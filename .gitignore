@@ -1,0 +1,52 @@
+# OS and editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Local project configuration
+.galaxy-ai/
+galaxy-ai.local.json
+*.local.json
+
+# Node and frontend artifacts
+node_modules/
+frontend/node_modules/
+dist/
+build/
+coverage/
+.vite/
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+backend/.venv/
+
+# Local databases and runtime files
+*.sqlite
+*.sqlite3
+*.db
+*.db-shm
+*.db-wal
+
+# Local AI artifacts and fallback runtime directories
+models/
+outputs/
+datasets/
+checkpoints/
+artifacts/
+runs/
+logs/

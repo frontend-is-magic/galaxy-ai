@@ -1,41 +1,56 @@
 import {
   AlertCircle,
-  CheckCircle2,
-  Cpu,
   Database,
-  Folder,
   Gauge,
   Play,
   RotateCcw,
-  ShieldCheck,
   SlidersHorizontal,
   Sparkles,
   Square,
 } from "lucide-react";
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 
-import type { RunRecord, RunStatus, TrainingRequest } from "./api";
+import type {
+  ModelOptionsResponse,
+  RunRecord,
+  RunStatus,
+  TrainingRequest,
+} from "./api";
 import type {
   BatchImageClassificationTask,
   TaskCapabilityMode,
+  TaskDirectories,
   TaskStatus,
-  TaskViewMode,
 } from "./types";
 
 type TaskInspectorProps = {
   task: BatchImageClassificationTask;
-  viewMode: TaskViewMode;
   capabilityMode: TaskCapabilityMode;
+  isMoreSettingsOpen: boolean;
   trainingRequest: TrainingRequest;
+  classificationRun: RunRecord | null;
+  classificationLogs: string[];
+  classificationError: string | null;
   trainingRun: RunRecord | null;
   trainingLogs: string[];
   trainingError: string | null;
+  modelOptions: ModelOptionsResponse | null;
+  modelOptionsError: string | null;
+  taskDirectories: TaskDirectories;
   isTrainingSubmitting: boolean;
-  onViewModeChange: (mode: TaskViewMode) => void;
+  isClassificationSubmitting: boolean;
+  canStartTask: boolean;
+  startBlockedReason: string | null;
+  activeTaskMode: TaskCapabilityMode | null;
   onCapabilityModeChange: (mode: TaskCapabilityMode) => void;
+  onMoreSettingsToggle: () => void;
   onTrainingRequestChange: (update: Partial<TrainingRequest>) => void;
-  onStartClassification: () => void;
+  onTaskDirectoryChange: (update: Partial<TaskDirectories>) => void;
+  onTaskModelChange: (modelRef: string) => void;
+  onSelectTaskDirectory: (key: keyof TaskDirectories) => void;
+  onStartClassification: (batchSize: number) => void;
   onStartTraining: () => void;
+  onCancelClassification: () => void;
   onCancelTraining: () => void;
 };
 
@@ -46,45 +61,67 @@ const taskStatusLabel: Record<TaskStatus, string> = {
   error: "错误",
 };
 
-const runStatusLabel: Record<RunStatus, string> = {
-  queued: "排队中",
-  running: "运行中",
-  completed: "已完成",
-  error: "错误",
-  cancelling: "取消中",
-  cancelled: "已取消",
-  interrupted: "已中断",
-};
-
 const unfinishedRunStatuses = new Set<RunStatus>(["queued", "running", "cancelling"]);
+const batchSizeOptions = [8, 16, 32, 64];
 
 export function TaskInspector({
   task,
-  viewMode,
   capabilityMode,
+  isMoreSettingsOpen,
   trainingRequest,
+  classificationRun,
+  classificationLogs,
+  classificationError,
   trainingRun,
   trainingLogs,
   trainingError,
+  modelOptions,
+  modelOptionsError,
+  taskDirectories,
   isTrainingSubmitting,
-  onViewModeChange,
+  isClassificationSubmitting,
+  canStartTask,
+  startBlockedReason,
+  activeTaskMode,
   onCapabilityModeChange,
+  onMoreSettingsToggle,
   onTrainingRequestChange,
+  onTaskDirectoryChange,
+  onTaskModelChange,
+  onSelectTaskDirectory,
   onStartClassification,
   onStartTraining,
+  onCancelClassification,
   onCancelTraining,
 }: TaskInspectorProps) {
-  const progress =
-    task.total_images === 0
-      ? 0
-      : Math.round((task.processed_images / task.total_images) * 100);
   const isTraining = capabilityMode === "training";
-  const canCancelTraining =
-    Boolean(trainingRun) &&
-    trainingRun !== null &&
-    unfinishedRunStatuses.has(trainingRun.status);
-  const isTrainingStartDisabled =
-    isTrainingSubmitting || (isTraining && canCancelTraining);
+  const [classificationBatchSize, setClassificationBatchSize] = useState(32);
+  const [classificationConfidence, setClassificationConfidence] = useState(0.72);
+  const [pendingCancelMode, setPendingCancelMode] = useState<TaskCapabilityMode | null>(
+    null,
+  );
+  const activeRun =
+    activeTaskMode === "classification"
+      ? classificationRun
+      : activeTaskMode === "training"
+        ? trainingRun
+        : null;
+  const isActiveSubmitting =
+    activeTaskMode === "classification"
+      ? isClassificationSubmitting
+      : activeTaskMode === "training"
+        ? isTrainingSubmitting
+        : false;
+
+  function confirmCancel() {
+    if (pendingCancelMode === "training") {
+      onCancelTraining();
+    }
+    if (pendingCancelMode === "classification") {
+      onCancelClassification();
+    }
+    setPendingCancelMode(null);
+  }
 
   return (
     <aside className="task-inspector fixed inset-x-4 bottom-4 top-20 z-20 max-w-[calc(100vw-2rem)] overflow-hidden rounded-2xl border border-white/12 bg-[#07111c]/88 shadow-[0_24px_80px_rgba(0,0,0,0.58)] backdrop-blur-2xl md:inset-x-auto md:left-auto md:right-5 md:w-[31rem] md:max-w-none lg:right-6">
@@ -107,27 +144,6 @@ export function TaskInspector({
 
           <SegmentedTabs
             className="mt-5"
-            label="展示模式"
-            tabs={[
-              {
-                id: "starmap",
-                label: "星图模式",
-                icon: <Sparkles className="size-4" aria-hidden="true" />,
-                active: viewMode === "starmap",
-                onClick: () => onViewModeChange("starmap"),
-              },
-              {
-                id: "professional",
-                label: "专业模式",
-                icon: <SlidersHorizontal className="size-4" aria-hidden="true" />,
-                active: viewMode === "professional",
-                onClick: () => onViewModeChange("professional"),
-              },
-            ]}
-          />
-
-          <SegmentedTabs
-            className="mt-3"
             label="任务能力"
             tabs={[
               {
@@ -149,58 +165,109 @@ export function TaskInspector({
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto p-5 sm:p-6">
-          {viewMode === "starmap" && capabilityMode === "classification" ? (
-            <ClassificationStarmap task={task} progress={progress} />
-          ) : null}
-
-          {viewMode === "starmap" && capabilityMode === "training" ? (
-            <TrainingStarmap
-              trainingRequest={trainingRequest}
-              trainingRun={trainingRun}
-              trainingLogs={trainingLogs}
-              trainingError={trainingError}
+          {capabilityMode === "classification" ? (
+            <ClassificationSummary
+              modelOptions={modelOptions}
+              modelOptionsError={modelOptionsError}
+              selectedModel={trainingRequest.base_model_ref}
+              classificationRun={classificationRun}
+              classificationLogs={classificationLogs}
+              classificationError={classificationError}
+              taskDirectories={taskDirectories}
+              startBlockedReason={startBlockedReason}
+              onTaskModelChange={onTaskModelChange}
+              onTaskDirectoryChange={onTaskDirectoryChange}
+              onSelectTaskDirectory={onSelectTaskDirectory}
             />
           ) : null}
 
-          {viewMode === "professional" && capabilityMode === "classification" ? (
-            <ClassificationProfessional task={task} progress={progress} />
-          ) : null}
-
-          {viewMode === "professional" && capabilityMode === "training" ? (
-            <TrainingProfessional
+          {capabilityMode === "training" ? (
+            <TrainingSummary
               trainingRequest={trainingRequest}
               trainingRun={trainingRun}
               trainingLogs={trainingLogs}
               trainingError={trainingError}
+              modelOptions={modelOptions}
+              modelOptionsError={modelOptionsError}
+              taskDirectories={taskDirectories}
+              onTaskModelChange={onTaskModelChange}
+              onTaskDirectoryChange={onTaskDirectoryChange}
+              onSelectTaskDirectory={onSelectTaskDirectory}
               onTrainingRequestChange={onTrainingRequestChange}
-              onCancelTraining={onCancelTraining}
-              canCancelTraining={canCancelTraining}
+              startBlockedReason={startBlockedReason}
             />
+          ) : null}
+
+          {capabilityMode === "classification" ? (
+            <MoreSettingsAccordion
+              isOpen={isMoreSettingsOpen}
+              onToggle={onMoreSettingsToggle}
+            >
+              <ClassificationAdvanced
+                task={task}
+                batchSize={classificationBatchSize}
+                confidence={classificationConfidence}
+                taskDirectories={taskDirectories}
+                onBatchSizeChange={setClassificationBatchSize}
+                onConfidenceChange={setClassificationConfidence}
+                onTaskDirectoryChange={onTaskDirectoryChange}
+                onSelectTaskDirectory={onSelectTaskDirectory}
+              />
+            </MoreSettingsAccordion>
           ) : null}
         </div>
 
         <div className="border-t border-white/10 p-5 sm:p-6">
-          <button
-            className="inline-flex w-full items-center justify-center gap-3 rounded-lg bg-cyan-400 px-5 py-4 text-base font-semibold text-cyan-950 shadow-[0_0_34px_rgba(34,211,238,0.32)] transition hover:bg-cyan-300 focus:outline-none focus:ring-2 focus:ring-cyan-100 disabled:cursor-not-allowed disabled:opacity-60"
-            type="button"
-            onClick={isTraining ? onStartTraining : onStartClassification}
-            disabled={isTrainingStartDisabled}
-          >
-            <Play className="size-5 fill-current" aria-hidden="true" />
-            {isTraining ? "开始训练" : "开始分类"}
-          </button>
+          <TaskActionButton
+            activeMode={activeTaskMode}
+            currentMode={capabilityMode}
+            disabled={!canStartTask}
+            isSubmitting={isActiveSubmitting}
+            run={activeRun}
+            onStart={
+              isTraining
+                ? onStartTraining
+                : () => onStartClassification(classificationBatchSize)
+            }
+            onRequestCancel={(mode) => setPendingCancelMode(mode)}
+          />
         </div>
       </div>
+      {pendingCancelMode ? (
+        <CancelRunDialog
+          mode={pendingCancelMode}
+          onClose={() => setPendingCancelMode(null)}
+          onConfirm={confirmCancel}
+        />
+      ) : null}
     </aside>
   );
 }
 
-function ClassificationStarmap({
-  task,
-  progress,
+function ClassificationSummary({
+  modelOptions,
+  modelOptionsError,
+  selectedModel,
+  classificationRun,
+  classificationLogs,
+  classificationError,
+  taskDirectories,
+  startBlockedReason,
+  onTaskModelChange,
+  onTaskDirectoryChange,
+  onSelectTaskDirectory,
 }: {
-  task: BatchImageClassificationTask;
-  progress: number;
+  modelOptions: ModelOptionsResponse | null;
+  modelOptionsError: string | null;
+  selectedModel: string;
+  classificationRun: RunRecord | null;
+  classificationLogs: string[];
+  classificationError: string | null;
+  taskDirectories: TaskDirectories;
+  startBlockedReason: string | null;
+  onTaskModelChange: (modelRef: string) => void;
+  onTaskDirectoryChange: (update: Partial<TaskDirectories>) => void;
+  onSelectTaskDirectory: (key: keyof TaskDirectories) => void;
 }) {
   return (
     <div className="space-y-5">
@@ -208,23 +275,58 @@ function ClassificationStarmap({
         快速启动批量图片分类任务。路径、模型和输出位置全部保留在本机。
       </p>
 
-      <TaskBasics task={task} />
-      <TaskProgress task={task} progress={progress} />
-      <StatusLine task={task} />
+      <TaskSummaryControls
+        modelOptions={modelOptions}
+        modelOptionsError={modelOptionsError}
+        selectedModel={selectedModel}
+        taskDirectories={taskDirectories}
+        onModelChange={onTaskModelChange}
+        onTaskDirectoryChange={onTaskDirectoryChange}
+        onSelectTaskDirectory={onSelectTaskDirectory}
+      />
+      {startBlockedReason ? (
+        <div className="rounded-lg border border-amber-300/20 bg-amber-300/10 px-3 py-2 text-sm text-amber-200">
+          {startBlockedReason}
+        </div>
+      ) : null}
+      <RunStatusPanel
+        title="分类运行日志"
+        emptyLogMessage="等待分类运行。"
+        run={classificationRun}
+        logs={classificationLogs}
+        error={classificationError}
+        compact
+      />
     </div>
   );
 }
 
-function TrainingStarmap({
+function TrainingSummary({
   trainingRequest,
   trainingRun,
   trainingLogs,
   trainingError,
+  modelOptions,
+  modelOptionsError,
+  taskDirectories,
+  onTaskModelChange,
+  onTaskDirectoryChange,
+  onSelectTaskDirectory,
+  onTrainingRequestChange,
+  startBlockedReason,
 }: {
   trainingRequest: TrainingRequest;
   trainingRun: RunRecord | null;
   trainingLogs: string[];
   trainingError: string | null;
+  modelOptions: ModelOptionsResponse | null;
+  modelOptionsError: string | null;
+  taskDirectories: TaskDirectories;
+  onTaskModelChange: (modelRef: string) => void;
+  onTaskDirectoryChange: (update: Partial<TaskDirectories>) => void;
+  onSelectTaskDirectory: (key: keyof TaskDirectories) => void;
+  onTrainingRequestChange: (update: Partial<TrainingRequest>) => void;
+  startBlockedReason: string | null;
 }) {
   return (
     <div className="space-y-5">
@@ -234,298 +336,305 @@ function TrainingStarmap({
           训练摘要
         </div>
         <p className="mt-3 text-sm leading-6 text-slate-300">
-          本地微调图片分类模型。完整参数在专业模式中配置，数据集不上传。
-          切换到专业模式可调整路径、超参和下载开关。
+          本地微调图片分类模型。目录、超参、日志和取消控制都集中在这里。
+          数据集不会上传。
         </p>
         <div className="mt-4 grid gap-3 text-sm">
-          <InfoRow label="基础模型" value={trainingRequest.base_model_ref} />
-          <InfoRow label="数据集" value={trainingRequest.dataset_directory} />
-          <InfoRow label="轮次" value={`${trainingRequest.epochs} epochs`} />
+          <TaskSummaryControls
+            modelOptions={modelOptions}
+            modelOptionsError={modelOptionsError}
+            selectedModel={trainingRequest.base_model_ref}
+            taskDirectories={taskDirectories}
+            includeAdvancedDirectories
+            onModelChange={onTaskModelChange}
+            onTaskDirectoryChange={onTaskDirectoryChange}
+            onSelectTaskDirectory={onSelectTaskDirectory}
+          />
         </div>
       </section>
-      <RunStatusPanel
-        run={trainingRun}
-        logs={trainingLogs}
-        error={trainingError}
-        compact
-      />
-    </div>
-  );
-}
-
-function ClassificationProfessional({
-  task,
-  progress,
-}: {
-  task: BatchImageClassificationTask;
-  progress: number;
-}) {
-  return (
-    <div className="space-y-5">
       <section className="panel-section">
         <div className="section-title">
-          <Gauge className="size-4 text-cyan-300" aria-hidden="true" />
-          分类参数
+          <SlidersHorizontal className="size-4 text-cyan-300" aria-hidden="true" />
+          训练设置
         </div>
-        <div className="mt-4 grid gap-3 text-sm">
-          <InfoRow label="批大小" value="32 images" />
-          <InfoRow label="置信度阈值" value="0.72" />
-          <InfoRow label="支持格式" value={task.supported_formats.join(", ")} />
-        </div>
-      </section>
-
-      <section className="panel-section">
-        <div className="section-title">
-          <Cpu className="size-4 text-cyan-300" aria-hidden="true" />
-          本地运行配置
-        </div>
-        <div className="mt-4 grid gap-3 text-sm">
-          <InfoRow label="硬件后端" value={task.hardware_backend.label} />
-          <InfoRow label="设备" value={task.hardware_backend.device_name} />
-          <InfoRow label="模型路径" value={task.model_path} />
-          <InfoRow label="工作目录" value={task.working_directory} />
-          <InfoRow label="输出位置" value={task.output_directory} />
-        </div>
-      </section>
-
-      <section className="panel-section">
-        <div className="section-title">
-          <AlertCircle className="size-4 text-cyan-300" aria-hidden="true" />
-          运行日志
-        </div>
-        <div className="mt-4 space-y-3 text-sm text-slate-300">
-          <TaskProgress task={task} progress={progress} />
-          <StatusLine task={task} />
-          <div className="rounded-lg border border-white/10 bg-black/24 p-3 text-xs leading-5 text-slate-400">
-            [{new Date().toLocaleTimeString("zh-CN", { hour12: false })}]{" "}
-            {task.status_message}
-          </div>
-        </div>
-      </section>
-    </div>
-  );
-}
-
-function TrainingProfessional({
-  trainingRequest,
-  trainingRun,
-  trainingLogs,
-  trainingError,
-  onTrainingRequestChange,
-  onCancelTraining,
-  canCancelTraining,
-}: {
-  trainingRequest: TrainingRequest;
-  trainingRun: RunRecord | null;
-  trainingLogs: string[];
-  trainingError: string | null;
-  onTrainingRequestChange: (update: Partial<TrainingRequest>) => void;
-  onCancelTraining: () => void;
-  canCancelTraining: boolean;
-}) {
-  return (
-    <div className="space-y-5">
-      <section className="panel-section">
-        <div className="flex items-center justify-between gap-3">
-          <div className="section-title">
-            <Database className="size-4 text-cyan-300" aria-hidden="true" />
-            本地训练配置
-          </div>
-          <div className="inline-flex items-center gap-2 text-xs font-medium text-emerald-300">
-            <ShieldCheck className="size-4" aria-hidden="true" />
-            数据集不上传
-          </div>
-        </div>
-
-        <p className="mt-3 text-xs leading-5 text-slate-400">
-          ImageFolder 数据集结构：train/&lt;label&gt;/image files。
-        </p>
-
-        <div className="mt-4 grid gap-3">
-          <TextField
-            label="基础模型"
-            value={trainingRequest.base_model_ref}
-            onChange={(value) => onTrainingRequestChange({ base_model_ref: value })}
-          />
-          <TextField
-            label="数据集目录"
-            value={trainingRequest.dataset_directory}
-            onChange={(value) => onTrainingRequestChange({ dataset_directory: value })}
-          />
-          <TextField
-            label="输出目录"
-            value={trainingRequest.output_directory ?? ""}
-            onChange={(value) =>
-              onTrainingRequestChange({ output_directory: value || null })
-            }
-          />
-          <TextField
-            label="Checkpoint目录"
-            value={trainingRequest.checkpoint_directory ?? ""}
-            onChange={(value) =>
-              onTrainingRequestChange({ checkpoint_directory: value || null })
-            }
-          />
-        </div>
-
         <div className="mt-4 grid grid-cols-2 gap-3">
           <NumberField
-            label="Epochs"
+            label="训练轮次"
             min={1}
             max={1000}
             value={trainingRequest.epochs}
             onChange={(value) => onTrainingRequestChange({ epochs: value })}
           />
-          <NumberField
-            label="Batch size"
-            min={1}
-            max={256}
+          <BatchSizeSelect
+            label="批大小"
             value={trainingRequest.batch_size}
             onChange={(value) => onTrainingRequestChange({ batch_size: value })}
           />
           <NumberField
-            label="Learning rate"
+            label="学习率"
             min={0.000001}
             step={0.00001}
             value={trainingRequest.learning_rate}
             onChange={(value) => onTrainingRequestChange({ learning_rate: value })}
           />
-          <NumberField
-            label="Seed"
+          <SeedField
+            label="随机种子"
             value={trainingRequest.seed}
+            enabled={trainingRequest.use_seed}
             onChange={(value) => onTrainingRequestChange({ seed: value })}
+            onEnabledChange={(enabled) =>
+              onTrainingRequestChange({ use_seed: enabled })
+            }
           />
         </div>
-
-        <div className="mt-4 space-y-3">
-          <DeviceSelector
-            value={trainingRequest.device}
-            onChange={(device) => onTrainingRequestChange({ device })}
-          />
-          <label className="flex items-center justify-between gap-3 rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-sm">
-            <span>
-              <span className="block font-medium text-slate-100">允许显式下载模型</span>
-              <span className="text-xs text-slate-400">
-                关闭时只使用本地已有模型路径。
-              </span>
-            </span>
-            <input
-              aria-label="允许显式下载模型"
-              checked={trainingRequest.allow_download}
-              className="size-4 accent-cyan-300"
-              type="checkbox"
-              onChange={(event) =>
-                onTrainingRequestChange({
-                  allow_download: event.currentTarget.checked,
-                })
-              }
-            />
-          </label>
-        </div>
+        {startBlockedReason ? (
+          <div className="mt-4 rounded-lg border border-amber-300/20 bg-amber-300/10 px-3 py-2 text-sm text-amber-200">
+            {startBlockedReason}
+          </div>
+        ) : null}
       </section>
-
       <RunStatusPanel
+        title="训练运行日志"
+        emptyLogMessage="等待训练运行。"
         run={trainingRun}
         logs={trainingLogs}
         error={trainingError}
-        onCancel={onCancelTraining}
-        canCancel={canCancelTraining}
       />
     </div>
   );
 }
 
-function TaskBasics({ task }: { task: BatchImageClassificationTask }) {
+function ClassificationAdvanced({
+  task,
+  batchSize,
+  confidence,
+  taskDirectories,
+  onBatchSizeChange,
+  onConfidenceChange,
+  onTaskDirectoryChange,
+  onSelectTaskDirectory,
+}: {
+  task: BatchImageClassificationTask;
+  batchSize: number;
+  confidence: number;
+  taskDirectories: TaskDirectories;
+  onBatchSizeChange: (value: number) => void;
+  onConfidenceChange: (value: number) => void;
+  onTaskDirectoryChange: (update: Partial<TaskDirectories>) => void;
+  onSelectTaskDirectory: (key: keyof TaskDirectories) => void;
+}) {
   return (
-    <div className="space-y-3">
-      <InfoRow
-        icon={<Cpu className="size-4" aria-hidden="true" />}
-        label="计算后端"
-        value={task.hardware_backend.label}
-        status={taskStatusLabel[task.status]}
+    <div className="grid gap-4 text-sm">
+      <DirectoryField
+        label="模型目录"
+        value={taskDirectories.model_directory}
+        onChange={(value) => onTaskDirectoryChange({ model_directory: value })}
+        onSelect={() => onSelectTaskDirectory("model_directory")}
       />
-      <InfoRow label="模型" value={task.model_path} />
-      <InfoRow
-        icon={<Folder className="size-4" aria-hidden="true" />}
-        label="工作目录"
-        value={task.working_directory}
+      <DirectoryField
+        label="Checkpoint目录"
+        value={taskDirectories.checkpoint_directory}
+        onChange={(value) => onTaskDirectoryChange({ checkpoint_directory: value })}
+        onSelect={() => onSelectTaskDirectory("checkpoint_directory")}
       />
-      <InfoRow
-        icon={<Folder className="size-4" aria-hidden="true" />}
-        label="输入文件夹"
-        value={task.input_directory}
+      <BatchSizeSelect label="批大小" value={batchSize} onChange={onBatchSizeChange} />
+      <NumberField
+        label="置信度阈值"
+        min={0}
+        max={1}
+        step={0.01}
+        value={confidence}
+        onChange={onConfidenceChange}
       />
-      <InfoRow
-        icon={<Folder className="size-4" aria-hidden="true" />}
-        label="输出位置"
-        value={task.output_directory}
-      />
+      <InfoRow label="支持格式" value={task.supported_formats.join(", ")} />
+      <div className="rounded-lg border border-white/10 bg-black/24 p-3 text-xs leading-5 text-slate-400">
+        [{new Date().toLocaleTimeString("zh-CN", { hour12: false })}]{" "}
+        {task.status_message}
+      </div>
     </div>
+  );
+}
+
+function MoreSettingsAccordion({
+  isOpen,
+  onToggle,
+  children,
+}: {
+  isOpen: boolean;
+  onToggle: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <section className="mt-5 rounded-xl border border-white/10 bg-black/18">
+      <button
+        aria-expanded={isOpen}
+        className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left text-sm font-semibold text-slate-100 transition hover:bg-white/[0.04] focus:outline-none focus:ring-2 focus:ring-cyan-300/35"
+        type="button"
+        onClick={onToggle}
+      >
+        <span className="inline-flex items-center gap-2">
+          <SlidersHorizontal className="size-4 text-cyan-300" aria-hidden="true" />
+          更多设置
+        </span>
+        <span className="text-xs text-slate-400">{isOpen ? "收起" : "展开"}</span>
+      </button>
+      {isOpen ? (
+        <div className="space-y-5 border-t border-white/10 p-4">{children}</div>
+      ) : null}
+    </section>
+  );
+}
+
+function TaskSummaryControls({
+  modelOptions,
+  modelOptionsError,
+  selectedModel,
+  taskDirectories,
+  includeAdvancedDirectories = false,
+  onModelChange,
+  onTaskDirectoryChange,
+  onSelectTaskDirectory,
+}: {
+  modelOptions: ModelOptionsResponse | null;
+  modelOptionsError: string | null;
+  selectedModel: string;
+  taskDirectories: TaskDirectories;
+  includeAdvancedDirectories?: boolean;
+  onModelChange: (modelRef: string) => void;
+  onTaskDirectoryChange: (update: Partial<TaskDirectories>) => void;
+  onSelectTaskDirectory: (key: keyof TaskDirectories) => void;
+}) {
+  return (
+    <div className="grid gap-3">
+      <label className="grid gap-2 text-sm">
+        <span className="text-slate-400">基础模型</span>
+        <select
+          aria-label="基础模型"
+          className="min-w-0 rounded-lg border border-white/10 bg-[#121827] px-3 py-2 text-slate-100 outline-none transition focus:border-cyan-300/45 focus:ring-2 focus:ring-cyan-300/15"
+          value={selectedModel}
+          onChange={(event) => onModelChange(event.currentTarget.value)}
+        >
+          {!selectedModel ? (
+            <option disabled value="">
+              暂无可用模型
+            </option>
+          ) : null}
+          {selectedModel && !hasModelOption(modelOptions, selectedModel) ? (
+            <option value={selectedModel}>{selectedModel}</option>
+          ) : null}
+          <optgroup label="本地模型">
+            {(modelOptions?.local_models?.length ?? 0) > 0 ? (
+              modelOptions?.local_models.map((model) => (
+                <option key={model.path} value={model.path}>
+                  {model.label}
+                </option>
+              ))
+            ) : (
+              <option disabled value="__empty_local__">
+                未发现本地模型
+              </option>
+            )}
+          </optgroup>
+          <option disabled value="__separator__">
+            ────────
+          </option>
+          <optgroup label="HF 推荐模型">
+            {modelOptions?.recommended_hf_models?.map((model) => (
+              <option key={model.path} value={model.path}>
+                {model.label}
+              </option>
+            ))}
+          </optgroup>
+        </select>
+      </label>
+
+      {modelOptionsError ? (
+        <div className="mt-3 rounded-lg border border-amber-300/20 bg-amber-300/10 px-3 py-2 text-sm text-amber-200">
+          {modelOptionsError}
+        </div>
+      ) : null}
+
+      <DirectoryField
+        label="工作目录"
+        value={taskDirectories.working_directory}
+        onChange={(value) => onTaskDirectoryChange({ working_directory: value })}
+        onSelect={() => onSelectTaskDirectory("working_directory")}
+      />
+      <DirectoryField
+        label="数据集目录"
+        value={taskDirectories.dataset_directory}
+        onChange={(value) => onTaskDirectoryChange({ dataset_directory: value })}
+        onSelect={() => onSelectTaskDirectory("dataset_directory")}
+      />
+      <DirectoryField
+        label="输出目录"
+        value={taskDirectories.output_directory}
+        onChange={(value) => onTaskDirectoryChange({ output_directory: value })}
+        onSelect={() => onSelectTaskDirectory("output_directory")}
+      />
+      {includeAdvancedDirectories ? (
+        <>
+          <DirectoryField
+            label="模型目录"
+            value={taskDirectories.model_directory}
+            onChange={(value) => onTaskDirectoryChange({ model_directory: value })}
+            onSelect={() => onSelectTaskDirectory("model_directory")}
+          />
+          <DirectoryField
+            label="Checkpoint目录"
+            value={taskDirectories.checkpoint_directory}
+            onChange={(value) => onTaskDirectoryChange({ checkpoint_directory: value })}
+            onSelect={() => onSelectTaskDirectory("checkpoint_directory")}
+          />
+        </>
+      ) : null}
+    </div>
+  );
+}
+
+function hasModelOption(
+  modelOptions: ModelOptionsResponse | null,
+  selectedModel: string,
+): boolean {
+  return Boolean(
+    modelOptions &&
+      [...modelOptions.local_models, ...modelOptions.recommended_hf_models].some(
+        (model) => model.path === selectedModel,
+      ),
   );
 }
 
 function RunStatusPanel({
+  title,
+  emptyLogMessage,
   run,
   logs,
   error,
   compact = false,
-  onCancel,
-  canCancel = false,
 }: {
+  title: string;
+  emptyLogMessage: string;
   run: RunRecord | null;
   logs: string[];
   error: string | null;
   compact?: boolean;
-  onCancel?: () => void;
-  canCancel?: boolean;
 }) {
-  const progress =
-    run && run.total_items > 0
-      ? Math.round((run.processed_items / run.total_items) * 100)
-      : 0;
-
   return (
     <section className="panel-section">
-      <div className="flex items-center justify-between gap-3">
-        <div className="section-title">
-          <RotateCcw className="size-4 text-cyan-300" aria-hidden="true" />
-          训练运行状态
-        </div>
-        {canCancel ? (
-          <button
-            className="inline-flex items-center gap-2 rounded-md border border-amber-300/30 bg-amber-300/10 px-3 py-1.5 text-xs font-semibold text-amber-200 transition hover:bg-amber-300/15"
-            type="button"
-            onClick={onCancel}
-          >
-            <Square className="size-3" aria-hidden="true" />
-            取消运行
-          </button>
-        ) : null}
+      <div className="section-title">
+        <RotateCcw className="size-4 text-cyan-300" aria-hidden="true" />
+        {title}
       </div>
 
       <div className="mt-4 grid gap-3 text-sm">
         <InfoRow label="run_id" value={run?.run_id ?? "尚未创建"} />
-        <InfoRow label="状态" value={run ? runStatusLabel[run.status] : "就绪"} />
         <InfoRow label="输出路径" value={run?.output_path ?? "--"} />
         {!compact ? (
           <InfoRow
             label="Checkpoint"
-            value={String(run?.request.checkpoint_directory ?? "--")}
+            value={String(run?.request?.checkpoint_directory ?? "--")}
           />
         ) : null}
-      </div>
-
-      <div className="mt-4 grid grid-cols-[auto_1fr_auto] items-center gap-3 text-sm text-slate-300">
-        <span>
-          {run?.processed_items ?? 0} / {run?.total_items ?? 0}
-        </span>
-        <div className="h-2 overflow-hidden rounded-full bg-slate-700/70">
-          <div
-            className="h-full rounded-full bg-cyan-300 transition-all"
-            style={{ width: `${progress}%` }}
-          />
-        </div>
-        <span>{progress}%</span>
       </div>
 
       {error || run?.error_message ? (
@@ -541,11 +650,190 @@ function RunStatusPanel({
           {logs.length > 0 ? (
             logs.slice(-4).map((line) => <p key={line}>{line}</p>)
           ) : (
-            <p>等待训练运行。</p>
+            <p>{emptyLogMessage}</p>
           )}
         </div>
       </div>
     </section>
+  );
+}
+
+function TaskActionButton({
+  activeMode,
+  currentMode,
+  disabled,
+  isSubmitting,
+  run,
+  onStart,
+  onRequestCancel,
+}: {
+  activeMode: TaskCapabilityMode | null;
+  currentMode: TaskCapabilityMode;
+  disabled: boolean;
+  isSubmitting: boolean;
+  run: RunRecord | null;
+  onStart: () => void;
+  onRequestCancel: (mode: TaskCapabilityMode) => void;
+}) {
+  if (activeMode) {
+    const progress = getRunProgress(run, activeMode);
+    const isCrossModeLock = activeMode !== currentMode;
+    const canRequestCancel =
+      Boolean(run) && run !== null && unfinishedRunStatuses.has(run.status);
+    const actionLabel = activeMode === "training" ? "终止训练" : "终止分类";
+    const progressLabel = activeMode === "training" ? "训练当前轮次进度" : "分类进度";
+
+    return (
+      <button
+        aria-label={actionLabel}
+        className="group w-full overflow-hidden rounded-lg border border-red-300/35 bg-red-500/18 px-5 py-4 text-left shadow-[0_0_34px_rgba(248,113,113,0.2)] transition hover:bg-red-500/24 focus:outline-none focus:ring-2 focus:ring-red-100 disabled:cursor-not-allowed disabled:opacity-70"
+        type="button"
+        disabled={!canRequestCancel}
+        onClick={() => onRequestCancel(activeMode)}
+      >
+        <span className="flex items-center justify-between gap-3">
+          <span className="inline-flex min-w-0 items-center gap-3 text-base font-semibold text-red-100">
+            <Square className="size-5 shrink-0" aria-hidden="true" />
+            <span className="truncate">{actionLabel}</span>
+          </span>
+          <span className="shrink-0 text-sm font-semibold text-red-100">
+            {progress.percent}%
+          </span>
+        </span>
+        <span className="mt-2 block text-sm text-red-100/82">
+          {formatActionSubtitle({
+            activeMode,
+            isCrossModeLock,
+            isSubmitting,
+            progress,
+          })}
+        </span>
+        <span
+          aria-label={progressLabel}
+          aria-valuemax={100}
+          aria-valuemin={0}
+          aria-valuenow={progress.percent}
+          className="mt-3 block h-2 overflow-hidden rounded-full bg-red-950/70"
+          role="progressbar"
+        >
+          <span
+            className="block h-full rounded-full bg-red-200 transition-all"
+            style={{ width: `${progress.percent}%` }}
+          />
+        </span>
+      </button>
+    );
+  }
+
+  const idleLabel = currentMode === "training" ? "开始训练" : "开始分类";
+
+  return (
+    <button
+      aria-label={idleLabel}
+      className="inline-flex w-full items-center justify-center gap-3 rounded-lg bg-cyan-400 px-5 py-4 text-base font-semibold text-cyan-950 shadow-[0_0_34px_rgba(34,211,238,0.32)] transition hover:bg-cyan-300 focus:outline-none focus:ring-2 focus:ring-cyan-100 disabled:cursor-not-allowed disabled:opacity-60"
+      type="button"
+      disabled={disabled}
+      onClick={onStart}
+    >
+      <Play className="size-5 fill-current" aria-hidden="true" />
+      {idleLabel}
+    </button>
+  );
+}
+
+function getRunProgress(
+  run: RunRecord | null,
+  mode: TaskCapabilityMode,
+): { current: number; total: number; percent: number } {
+  const context = run?.progress_context;
+  const usesEpochContext =
+    mode === "training" &&
+    context?.scope === "epoch" &&
+    typeof context.current === "number" &&
+    typeof context.total === "number";
+  const current = usesEpochContext
+    ? (context.current ?? 0)
+    : (run?.processed_items ?? 0);
+  const total = usesEpochContext ? (context.total ?? 0) : (run?.total_items ?? 0);
+  const percent = total > 0 ? Math.round((current / total) * 100) : 0;
+
+  return {
+    current,
+    total,
+    percent: Math.max(0, Math.min(100, percent)),
+  };
+}
+
+function formatActionSubtitle({
+  activeMode,
+  isCrossModeLock,
+  isSubmitting,
+  progress,
+}: {
+  activeMode: TaskCapabilityMode;
+  isCrossModeLock: boolean;
+  isSubmitting: boolean;
+  progress: { current: number; total: number };
+}) {
+  if (isSubmitting && progress.total === 0) {
+    return activeMode === "training" ? "训练提交中" : "分类提交中";
+  }
+
+  if (isCrossModeLock) {
+    return activeMode === "training"
+      ? "训练运行中，分类已锁定"
+      : "分类运行中，训练已锁定";
+  }
+
+  if (activeMode === "training") {
+    return `当前训练轮次进度 · ${progress.current} / ${progress.total}`;
+  }
+
+  return `分类运行中 · ${progress.current} / ${progress.total}`;
+}
+
+function CancelRunDialog({
+  mode,
+  onClose,
+  onConfirm,
+}: {
+  mode: TaskCapabilityMode;
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  const title = mode === "training" ? "确认终止训练任务" : "确认终止分类任务";
+
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/55 px-4 backdrop-blur-sm">
+      <div
+        aria-labelledby="cancel-run-title"
+        className="w-full max-w-sm rounded-xl border border-white/12 bg-[#07111c] p-5 shadow-[0_24px_80px_rgba(0,0,0,0.6)]"
+        role="dialog"
+      >
+        <h3 id="cancel-run-title" className="text-lg font-semibold text-white">
+          {title}
+        </h3>
+        <p className="mt-3 text-sm leading-6 text-slate-300">
+          已提交的本地运行会收到取消请求，正在写入的日志和输出目录会保留。
+        </p>
+        <div className="mt-5 grid grid-cols-2 gap-3">
+          <button
+            className="rounded-lg border border-white/10 bg-white/[0.055] px-4 py-3 text-sm font-semibold text-slate-100 transition hover:bg-white/[0.09]"
+            type="button"
+            onClick={onClose}
+          >
+            继续运行
+          </button>
+          <button
+            className="rounded-lg border border-amber-300/30 bg-amber-300/12 px-4 py-3 text-sm font-semibold text-amber-100 transition hover:bg-amber-300/18"
+            type="button"
+            onClick={onConfirm}
+          >
+            确认终止
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -637,22 +925,103 @@ function InfoRow({
   );
 }
 
-function TextField({
+function DirectoryField({
+  label,
+  value,
+  onChange,
+  onSelect,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  onSelect: () => void;
+}) {
+  return (
+    <label className="grid gap-2 text-sm">
+      <span className="text-slate-400">{label}</span>
+      <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-2">
+        <input
+          className="min-w-0 rounded-lg border border-white/10 bg-white/[0.035] px-3 py-2 text-slate-400 outline-none"
+          disabled
+          value={value}
+          onChange={(event) => onChange(event.currentTarget.value)}
+        />
+        <button
+          aria-label={`选择${label}`}
+          className="rounded-lg border border-white/10 bg-white/[0.055] px-3 py-2 text-xs font-semibold text-slate-200 transition hover:bg-white/[0.09]"
+          type="button"
+          onClick={onSelect}
+        >
+          选择
+        </button>
+      </div>
+    </label>
+  );
+}
+
+function BatchSizeSelect({
   label,
   value,
   onChange,
 }: {
   label: string;
-  value: string;
-  onChange: (value: string) => void;
+  value: number;
+  onChange: (value: number) => void;
 }) {
   return (
-    <label className="grid grid-cols-[5.6rem_minmax(0,1fr)] items-center gap-3 text-sm sm:grid-cols-[6.25rem_minmax(0,1fr)]">
+    <label className="grid gap-1.5 text-sm">
       <span className="text-slate-400">{label}</span>
+      <select
+        aria-label={label}
+        className="min-w-0 rounded-lg border border-white/10 bg-[#121827] px-3 py-2 text-slate-100 outline-none transition focus:border-cyan-300/45 focus:ring-2 focus:ring-cyan-300/15"
+        value={String(value)}
+        onChange={(event) => onChange(Number(event.currentTarget.value))}
+      >
+        {batchSizeOptions.map((option) => (
+          <option key={option} value={option}>
+            {option}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+function SeedField({
+  label,
+  value,
+  enabled,
+  onChange,
+  onEnabledChange,
+}: {
+  label: string;
+  value: number;
+  enabled: boolean;
+  onChange: (value: number) => void;
+  onEnabledChange: (enabled: boolean) => void;
+}) {
+  return (
+    <label className="grid gap-1.5 text-sm">
+      <span className="flex items-center justify-between gap-3 text-slate-400">
+        <span>{label}</span>
+        <span className="inline-flex items-center gap-1.5 text-xs text-slate-300">
+          <input
+            aria-label="启用随机种子"
+            checked={enabled}
+            className="size-3.5 accent-cyan-300"
+            type="checkbox"
+            onChange={(event) => onEnabledChange(event.currentTarget.checked)}
+          />
+          启用
+        </span>
+      </span>
       <input
-        className="min-w-0 rounded-lg border border-white/10 bg-white/[0.045] px-3 py-2 text-slate-100 outline-none transition placeholder:text-slate-500 focus:border-cyan-300/45 focus:ring-2 focus:ring-cyan-300/15"
+        aria-label={label}
+        className="min-w-0 rounded-lg border border-white/10 bg-white/[0.045] px-3 py-2 text-slate-100 outline-none transition disabled:cursor-not-allowed disabled:border-white/[0.06] disabled:bg-white/[0.025] disabled:text-slate-500 focus:border-cyan-300/45 focus:ring-2 focus:ring-cyan-300/15"
+        disabled={!enabled}
+        type="number"
         value={value}
-        onChange={(event) => onChange(event.currentTarget.value)}
+        onChange={(event) => onChange(Number(event.currentTarget.value))}
       />
     </label>
   );
@@ -686,85 +1055,5 @@ function NumberField({
         onChange={(event) => onChange(Number(event.currentTarget.value))}
       />
     </label>
-  );
-}
-
-function DeviceSelector({
-  value,
-  onChange,
-}: {
-  value: string;
-  onChange: (value: string) => void;
-}) {
-  return (
-    <div className="grid gap-2 text-sm">
-      <span className="text-slate-400">设备</span>
-      <div className="grid grid-cols-4 gap-2">
-        {["auto", "cpu", "cuda", "mps"].map((device) => (
-          <button
-            key={device}
-            className={`rounded-md border px-2 py-2 text-xs font-semibold uppercase transition ${
-              value === device
-                ? "border-cyan-300/45 bg-cyan-300/12 text-cyan-200"
-                : "border-white/10 bg-white/[0.04] text-slate-400 hover:text-slate-100"
-            }`}
-            type="button"
-            aria-pressed={value === device}
-            onClick={() => onChange(device)}
-          >
-            {device}
-          </button>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function TaskProgress({
-  task,
-  progress,
-}: {
-  task: BatchImageClassificationTask;
-  progress: number;
-}) {
-  return (
-    <div className="space-y-3 border-t border-white/10 pt-5">
-      <div className="flex items-center justify-between text-sm">
-        <span className="text-slate-400">任务状态</span>
-        <span className="font-medium text-slate-100">
-          {taskStatusLabel[task.status]}
-        </span>
-      </div>
-      <div className="grid grid-cols-[auto_1fr_auto] items-center gap-3 text-sm text-slate-300">
-        <span>
-          {task.processed_images.toLocaleString("en-US")} /{" "}
-          {task.total_images.toLocaleString("en-US")}
-        </span>
-        <div className="h-2 overflow-hidden rounded-full bg-slate-700/70">
-          <div
-            className="h-full rounded-full bg-cyan-300 transition-all"
-            style={{ width: `${progress}%` }}
-          />
-        </div>
-        <span>{progress}%</span>
-      </div>
-    </div>
-  );
-}
-
-function StatusLine({ task }: { task: BatchImageClassificationTask }) {
-  const hasError = Boolean(task.error_message);
-  return (
-    <div className="flex items-center gap-2 border-t border-white/10 pt-5 text-sm">
-      {hasError ? (
-        <AlertCircle className="size-4 text-amber-300" aria-hidden="true" />
-      ) : (
-        <CheckCircle2 className="size-4 text-emerald-300" aria-hidden="true" />
-      )}
-      <span className="text-slate-400">错误信息</span>
-      <span className={hasError ? "text-amber-300" : "text-slate-200"}>
-        {task.error_message ?? task.status_message}
-      </span>
-    </div>
   );
 }

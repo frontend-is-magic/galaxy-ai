@@ -5,6 +5,7 @@ import { GalaxyCanvas } from "./features/galaxy/GalaxyCanvas";
 import { TaskInspector } from "./features/galaxy/TaskInspector";
 import {
   cancelRun,
+  createImageClassificationInference,
   createImageClassificationTraining,
   getModelOptions,
   getRun,
@@ -14,7 +15,9 @@ import {
   updateSettings,
 } from "./features/galaxy/api";
 import type {
+  BatchInferenceRequest,
   DevicePreference,
+  ModelOption,
   ModelOptionsResponse,
   RunRecord,
   RunStatus,
@@ -47,6 +50,10 @@ export function App() {
   const [statusMessage, setStatusMessage] = useState("当前无错误");
   const [trainingRequest, setTrainingRequest] =
     useState<TrainingRequest>(defaultTrainingRequest);
+  const [classificationRun, setClassificationRun] = useState<RunRecord | null>(null);
+  const [classificationLogs, setClassificationLogs] = useState<string[]>([]);
+  const [classificationError, setClassificationError] = useState<string | null>(null);
+  const [isClassificationSubmitting, setIsClassificationSubmitting] = useState(false);
   const [trainingRun, setTrainingRun] = useState<RunRecord | null>(null);
   const [trainingLogs, setTrainingLogs] = useState<string[]>([]);
   const [trainingError, setTrainingError] = useState<string | null>(null);
@@ -75,9 +82,30 @@ export function App() {
     if (capabilityMode === "training" && trainingRun) {
       return mapRunStatusToTaskStatus(trainingRun.status);
     }
+    if (capabilityMode === "classification" && classificationRun) {
+      return mapRunStatusToTaskStatus(classificationRun.status);
+    }
 
     return status;
-  }, [capabilityMode, status, trainingRun]);
+  }, [capabilityMode, classificationRun, status, trainingRun]);
+
+  const selectedModelOption = useMemo(
+    () => findModelOption(modelOptions, trainingRequest.base_model_ref),
+    [modelOptions, trainingRequest.base_model_ref],
+  );
+  const selectedModelAllowsDownload = selectedModelOption?.source === "huggingface";
+  const selectedModelCompatibilityError =
+    selectedModelOption?.compatible === false
+      ? selectedModelOption.compatibility_error ||
+        "当前模型不是图片分类模型，请选择兼容模型。"
+      : null;
+  const startBlockedReason = selectedModelCompatibilityError;
+  const activeTaskMode = getActiveTaskMode({
+    classificationRun,
+    trainingRun,
+    isClassificationSubmitting,
+    isTrainingSubmitting,
+  });
 
   const task = {
     ...nebulaSorterTask,
@@ -86,22 +114,68 @@ export function App() {
     model_directory: taskDirectories.model_directory,
     input_directory: taskDirectories.dataset_directory,
     output_directory: taskDirectories.output_directory,
+    total_images:
+      capabilityMode === "classification" && classificationRun
+        ? classificationRun.total_items
+        : nebulaSorterTask.total_images,
+    processed_images:
+      capabilityMode === "classification" && classificationRun
+        ? classificationRun.processed_items
+        : nebulaSorterTask.processed_images,
     status: selectedStatus,
     error_message:
       capabilityMode === "training"
         ? trainingError || trainingRun?.error_message || null
-        : status === "error"
-          ? "输入目录无法访问"
-          : null,
+        : classificationError || classificationRun?.error_message || null,
     status_message:
       capabilityMode === "training"
         ? trainingError || trainingRun?.status || "训练准备就绪"
-        : statusMessage,
+        : classificationError || classificationRun?.status || statusMessage,
   };
 
-  function startClassification() {
-    setStatus("running");
-    setStatusMessage("正在扫描输入文件夹");
+  async function startClassification(batchSize: number) {
+    if (activeTaskMode) {
+      return;
+    }
+
+    setIsClassificationSubmitting(true);
+    setClassificationError(null);
+
+    try {
+      const request: BatchInferenceRequest = {
+        model_ref: trainingRequest.base_model_ref,
+        model_directory: taskDirectories.model_directory,
+        allow_download: selectedModelAllowsDownload,
+        input_directory: taskDirectories.dataset_directory,
+        output_directory: taskDirectories.output_directory,
+        recursive: true,
+        batch_size: batchSize,
+        top_k: 5,
+        device: globalDevice,
+      };
+      const created = await createImageClassificationInference(request);
+      setStatus("running");
+      setStatusMessage("分类任务已提交");
+      setClassificationRun(
+        createPendingRun(
+          created.run_id,
+          created.status,
+          "image_classification_inference",
+          request,
+          request.model_ref,
+          request.input_directory,
+          request.output_directory,
+          request.device,
+        ),
+      );
+      setClassificationLogs([]);
+      await refreshClassificationRun(created.run_id);
+    } catch (error) {
+      setStatus("error");
+      setClassificationError(error instanceof Error ? error.message : "分类请求失败。");
+    } finally {
+      setIsClassificationSubmitting(false);
+    }
   }
 
   function updateTrainingRequest(update: Partial<TrainingRequest>) {
@@ -138,7 +212,8 @@ export function App() {
 
   const canStartTask =
     Boolean(trainingRequest.base_model_ref) &&
-    (modelOptions === null || selectedModelAvailable);
+    (modelOptions === null || selectedModelAvailable) &&
+    !startBlockedReason;
 
   const openSettings = useCallback(async () => {
     setIsSettingsOpen(true);
@@ -243,6 +318,12 @@ export function App() {
     setTrainingLogs(logs.logs);
   }, []);
 
+  const refreshClassificationRun = useCallback(async (runId: string) => {
+    const [run, logs] = await Promise.all([getRun(runId), getRunLogs(runId)]);
+    setClassificationRun(run);
+    setClassificationLogs(logs.logs);
+  }, []);
+
   useEffect(() => {
     let isCurrent = true;
     setModelOptionsError(null);
@@ -267,13 +348,32 @@ export function App() {
   }, [taskDirectories.model_directory]);
 
   async function startTraining() {
+    if (activeTaskMode) {
+      return;
+    }
+
     setIsTrainingSubmitting(true);
     setTrainingError(null);
 
     try {
-      const request = { ...trainingRequest, device: globalDevice };
+      const request = {
+        ...trainingRequest,
+        allow_download: selectedModelAllowsDownload,
+        device: globalDevice,
+      };
       const created = await createImageClassificationTraining(request);
-      setTrainingRun(createPendingRun(created.run_id, created.status, request));
+      setTrainingRun(
+        createPendingRun(
+          created.run_id,
+          created.status,
+          "image_classification_training",
+          request,
+          request.base_model_ref,
+          request.dataset_directory,
+          request.output_directory,
+          request.device,
+        ),
+      );
       setTrainingLogs([]);
       await refreshTrainingRun(created.run_id);
     } catch (error) {
@@ -292,9 +392,36 @@ export function App() {
 
     try {
       await cancelRun(trainingRun.run_id);
+      setTrainingLogs((current) =>
+        current.includes("正在取消运行") ? current : [...current, "正在取消运行"],
+      );
       await refreshTrainingRun(trainingRun.run_id);
+      setTrainingLogs((current) =>
+        current.includes("正在取消运行") ? current : [...current, "正在取消运行"],
+      );
     } catch (error) {
       setTrainingError(error instanceof Error ? error.message : "取消运行失败。");
+    }
+  }
+
+  async function cancelClassification() {
+    if (!classificationRun) {
+      return;
+    }
+
+    setClassificationError(null);
+
+    try {
+      await cancelRun(classificationRun.run_id);
+      setClassificationLogs((current) =>
+        current.includes("正在取消运行") ? current : [...current, "正在取消运行"],
+      );
+      await refreshClassificationRun(classificationRun.run_id);
+      setClassificationLogs((current) =>
+        current.includes("正在取消运行") ? current : [...current, "正在取消运行"],
+      );
+    } catch (error) {
+      setClassificationError(error instanceof Error ? error.message : "取消运行失败。");
     }
   }
 
@@ -311,6 +438,24 @@ export function App() {
 
     return () => window.clearInterval(intervalId);
   }, [refreshTrainingRun, trainingRun]);
+
+  useEffect(() => {
+    if (!classificationRun || !unfinishedRunStatuses.has(classificationRun.status)) {
+      return undefined;
+    }
+
+    const intervalId = window.setInterval(() => {
+      void refreshClassificationRun(classificationRun.run_id).catch(
+        (error: unknown) => {
+          setClassificationError(
+            error instanceof Error ? error.message : "刷新分类状态失败。",
+          );
+        },
+      );
+    }, 2500);
+
+    return () => window.clearInterval(intervalId);
+  }, [classificationRun, refreshClassificationRun]);
 
   useEffect(() => {
     void getRuntimeHardware()
@@ -369,6 +514,9 @@ export function App() {
           isMoreSettingsOpen={isMoreSettingsOpen}
           task={task}
           trainingRequest={trainingRequest}
+          classificationRun={classificationRun}
+          classificationLogs={classificationLogs}
+          classificationError={classificationError}
           trainingRun={trainingRun}
           trainingLogs={trainingLogs}
           trainingError={trainingError}
@@ -376,7 +524,10 @@ export function App() {
           modelOptionsError={modelOptionsError}
           taskDirectories={taskDirectories}
           isTrainingSubmitting={isTrainingSubmitting}
+          isClassificationSubmitting={isClassificationSubmitting}
           canStartTask={canStartTask}
+          startBlockedReason={startBlockedReason}
+          activeTaskMode={activeTaskMode}
           onCapabilityModeChange={setCapabilityMode}
           onMoreSettingsToggle={() => setIsMoreSettingsOpen((current) => !current)}
           onTrainingRequestChange={updateTrainingRequest}
@@ -385,6 +536,7 @@ export function App() {
           onSelectTaskDirectory={showDirectoryLockedToast}
           onStartClassification={startClassification}
           onStartTraining={startTraining}
+          onCancelClassification={cancelClassification}
           onCancelTraining={cancelTraining}
         />
 
@@ -443,21 +595,54 @@ function mapRunStatusToTaskStatus(status: RunStatus): TaskStatus {
   return "running";
 }
 
+function getActiveTaskMode({
+  classificationRun,
+  trainingRun,
+  isClassificationSubmitting,
+  isTrainingSubmitting,
+}: {
+  classificationRun: RunRecord | null;
+  trainingRun: RunRecord | null;
+  isClassificationSubmitting: boolean;
+  isTrainingSubmitting: boolean;
+}): TaskCapabilityMode | null {
+  if (
+    isClassificationSubmitting ||
+    (classificationRun && unfinishedRunStatuses.has(classificationRun.status))
+  ) {
+    return "classification";
+  }
+
+  if (
+    isTrainingSubmitting ||
+    (trainingRun && unfinishedRunStatuses.has(trainingRun.status))
+  ) {
+    return "training";
+  }
+
+  return null;
+}
+
 function createPendingRun(
   runId: string,
   status: RunStatus,
-  request: TrainingRequest,
+  runType: string,
+  request: TrainingRequest | BatchInferenceRequest,
+  modelRef: string,
+  inputPath: string,
+  outputPath: string | null,
+  hardwareBackend: string,
 ): RunRecord {
   const now = new Date().toISOString();
   return {
     run_id: runId,
-    run_type: "image_classification_training",
+    run_type: runType,
     status,
     request,
-    hardware_backend: request.device,
-    model_ref: request.base_model_ref,
-    input_path: request.dataset_directory,
-    output_path: request.output_directory,
+    hardware_backend: hardwareBackend,
+    model_ref: modelRef,
+    input_path: inputPath,
+    output_path: outputPath,
     total_items: 0,
     processed_items: 0,
     error_message: null,
@@ -466,6 +651,21 @@ function createPendingRun(
     started_at: null,
     completed_at: null,
   };
+}
+
+function findModelOption(
+  modelOptions: ModelOptionsResponse | null,
+  selectedModel: string,
+): ModelOption | null {
+  if (!modelOptions || !selectedModel) {
+    return null;
+  }
+
+  return (
+    [...modelOptions.local_models, ...modelOptions.recommended_hf_models].find(
+      (model) => model.path === selectedModel,
+    ) ?? null
+  );
 }
 
 function hasModelOption(
@@ -483,8 +683,8 @@ function hasModelOption(
 
 function pickFallbackModel(modelOptions: ModelOptionsResponse | null): string {
   return (
-    modelOptions?.recommended_hf_models[0]?.path ??
     modelOptions?.local_models[0]?.path ??
+    modelOptions?.recommended_hf_models[0]?.path ??
     ""
   );
 }

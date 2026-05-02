@@ -36,6 +36,22 @@ Model training and fine-tuning are planned as an extensible task area so users c
 
 `models/`, `outputs/`, `datasets/`, and `checkpoints/` are fallback directories only. The actual working directories must be configurable from the app Settings UI.
 
+## Local Startup
+
+Run initialization after cloning the repository or when dependencies change:
+
+```bash
+./init.sh
+```
+
+Start the local backend and frontend after initialization:
+
+```bash
+./start.sh
+```
+
+Windows PowerShell users can run `./init.ps1` first, then `./start.ps1`.
+
 ## Repository Status
 
 This repository currently contains the initial project rules and metadata. The React and FastAPI scaffold will be created later on the `develop` branch.

@@ -50,6 +50,8 @@ Use this layout as the default direction when the scaffold is created:
 frontend/       React GUI
 backend/        FastAPI app, AI runtime, task registry, workers, storage, training workflows
 docs/           Architecture notes and decision records
+init.sh         macOS/Linux initialization entry
+init.ps1        Windows PowerShell initialization entry
 start.sh        macOS/Linux startup entry
 start.ps1       Windows PowerShell startup entry
 dev.sh          Optional macOS/Linux development entry
@@ -59,17 +61,20 @@ dev.ps1         Optional Windows PowerShell development entry
 - Startup scripts belong in the repository root, not in `scripts/`.
 - Do not commit local runtime directories such as `models/`, `outputs/`, `datasets/`, `checkpoints/`, SQLite runtime files, virtual environments, local config, or generated AI artifacts.
 
-## Startup Script Rules
+## Initialization and Startup Script Rules
 
+- Root initialization entries must be cross-platform: `init.sh` for macOS/Linux and `init.ps1` for Windows PowerShell.
 - Root startup entries must be cross-platform: `start.sh` for macOS/Linux and `start.ps1` for Windows PowerShell.
-- Startup scripts must run preflight/bootstrap checks for Node.js, npm, Python, uv, frontend dependencies, and the backend virtual environment.
-- Missing project-level dependencies must be fixed in place:
+- Initialization scripts must run preflight/bootstrap checks for Node.js, npm, Python, uv, frontend dependencies, and the backend virtual environment.
+- Missing project-level dependencies must be fixed in place by initialization scripts:
   - Install frontend dependencies with `npm ci` when a lockfile exists, otherwise `npm install`.
   - Create or synchronize the backend `.venv` with `uv sync` or an equivalent `uv` workflow.
+- Startup scripts must only start already initialized services.
+- Startup scripts must fail fast with clear guidance to run the matching initialization script when `frontend/node_modules` or `backend/.venv` is missing.
 - If `uv` is missing, scripts should guide installation using the official installer.
 - If fixing a missing tool requires modifying global PATH, shell profiles, a system package manager, or other machine-level state, the script must explain the action and ask for confirmation.
 - If Node.js or Python is missing, scripts must provide platform-specific installation guidance. They may call a platform package manager only after explicit confirmation.
-- Startup scripts must be idempotent: repeated runs should skip already satisfied steps.
+- Initialization scripts must be idempotent: repeated runs should skip or refresh already satisfied project dependencies without requiring manual cleanup.
 - Failures must report the missing item, suggested command, and any log location.
 
 ## Frontend Code Rules

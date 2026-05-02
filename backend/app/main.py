@@ -8,7 +8,10 @@ from pydantic import BaseModel
 
 from app.core.settings import AppSettings, get_settings
 from app.image_classification.device import select_device
-from app.image_classification.model_resolver import resolve_model_ref
+from app.image_classification.model_compatibility import (
+    image_classification_compatibility_error,
+)
+from app.image_classification.model_resolver import ResolvedModel, resolve_model_ref
 from app.image_classification.scanner import scan_images
 from app.image_classification.schemas import (
     BatchInferenceRequest,
@@ -16,14 +19,16 @@ from app.image_classification.schemas import (
     TrainingRequest,
 )
 from app.image_classification.service import validate_imagefolder_dataset
-from app.runs.executor import RunExecutor
 from app.runtime.hardware import detect_hardware
+from app.runtime.run_executor import RunExecutor
 from app.storage.database import initialize_database
 from app.storage.runs_store import (
+    ActiveRunExistsError,
     RunCreate,
     RunRecord,
     append_run_log,
-    create_run,
+    create_run_with_single_active_lock,
+    get_active_run,
     get_run,
     list_run_logs,
     mark_unfinished_runs_interrupted,
@@ -41,6 +46,9 @@ class ModelOption(BaseModel):
     label: str
     path: str
     source: str
+    compatible: bool
+    compatibility_error: str | None = None
+    requires_download: bool = False
 
 
 class ModelOptionsResponse(BaseModel):
@@ -48,21 +56,31 @@ class ModelOptionsResponse(BaseModel):
     recommended_hf_models: list[ModelOption]
 
 
+class ActiveRunResponse(BaseModel):
+    run: RunRecord | None
+
+
 RECOMMENDED_HF_MODELS = (
     ModelOption(
         label="Microsoft ResNet-50",
         path="microsoft/resnet-50",
         source="huggingface",
+        compatible=True,
+        requires_download=True,
     ),
     ModelOption(
         label="Google ViT Base",
         path="google/vit-base-patch16-224-in21k",
         source="huggingface",
+        compatible=True,
+        requires_download=True,
     ),
     ModelOption(
         label="Facebook ConvNeXT Tiny",
         path="facebook/convnext-tiny-224",
         source="huggingface",
+        compatible=True,
+        requires_download=True,
     ),
 )
 
@@ -74,15 +92,28 @@ def list_local_model_options(model_directory: str) -> list[ModelOption]:
 
     for child in sorted(root.iterdir(), key=lambda path: path.name.lower()):
         if child.is_dir() and (child / "config.json").is_file():
+            compatibility_error = image_classification_compatibility_error(child)
             options.append(
                 ModelOption(
                     label=child.name,
                     path=str(child),
                     source="local",
+                    compatible=compatibility_error is None,
+                    compatibility_error=compatibility_error,
+                    requires_download=False,
                 )
             )
 
     return options
+
+
+def ensure_image_classification_model(resolved: ResolvedModel) -> None:
+    if resolved.source != "local_path":
+        return
+
+    compatibility_error = image_classification_compatibility_error(Path(resolved.load_ref))
+    if compatibility_error is not None:
+        raise ValueError(compatibility_error)
 
 
 def _settings() -> AppSettings:
@@ -180,25 +211,29 @@ def create_app() -> FastAPI:
                 inference_request.allow_download,
                 model_directory,
             )
+            ensure_image_classification_model(resolved)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         output_base = Path(
             inference_request.output_directory or directory_settings.output_directory
         )
-        run = await create_run(
-            settings.database_path,
-            RunCreate(
-                run_type="image_classification_inference",
-                request=inference_request.model_dump(),
-                hardware_backend=device,
-                model_ref=inference_request.model_ref,
-                input_path=inference_request.input_directory
-                or ",".join(inference_request.input_paths or []),
-                output_path=str(output_base),
-                total_items=len(image_paths),
-            ),
-        )
+        try:
+            run = await create_run_with_single_active_lock(
+                settings.database_path,
+                RunCreate(
+                    run_type="image_classification_inference",
+                    request=inference_request.model_dump(),
+                    hardware_backend=device,
+                    model_ref=inference_request.model_ref,
+                    input_path=inference_request.input_directory
+                    or ",".join(inference_request.input_paths or []),
+                    output_path=str(output_base),
+                    total_items=len(image_paths),
+                ),
+            )
+        except ActiveRunExistsError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         await append_run_log(
             settings.database_path,
             run.run_id,
@@ -249,6 +284,7 @@ def create_app() -> FastAPI:
                 training_request.allow_download,
                 model_directory,
             )
+            ensure_image_classification_model(resolved)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -256,18 +292,21 @@ def create_app() -> FastAPI:
         checkpoint_base = Path(
             training_request.checkpoint_directory or directory_settings.checkpoint_directory
         )
-        run = await create_run(
-            settings.database_path,
-            RunCreate(
-                run_type="image_classification_training",
-                request=training_request.model_dump(),
-                hardware_backend=device,
-                model_ref=training_request.base_model_ref,
-                input_path=training_request.dataset_directory,
-                output_path=str(output_base),
-                total_items=len(labels),
-            ),
-        )
+        try:
+            run = await create_run_with_single_active_lock(
+                settings.database_path,
+                RunCreate(
+                    run_type="image_classification_training",
+                    request=training_request.model_dump(),
+                    hardware_backend=device,
+                    model_ref=training_request.base_model_ref,
+                    input_path=training_request.dataset_directory,
+                    output_path=str(output_base),
+                    total_items=len(labels),
+                ),
+            )
+        except ActiveRunExistsError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         await append_run_log(
             settings.database_path,
             run.run_id,
@@ -297,6 +336,10 @@ def create_app() -> FastAPI:
             },
         )
         return RunCreateResponse(run_id=run.run_id, status=run.status)
+
+    @api.get("/runs/active", response_model=ActiveRunResponse)
+    async def read_active_run() -> ActiveRunResponse:
+        return ActiveRunResponse(run=await get_active_run(_settings().database_path))
 
     @api.get("/runs/{run_id}", response_model=RunRecord)
     async def read_run(run_id: str) -> RunRecord:

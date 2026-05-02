@@ -12,6 +12,20 @@ from app.storage.database import initialize_database
 
 TERMINAL_STATUSES = {"completed", "error", "cancelled", "interrupted"}
 UNFINISHED_STATUSES = {"queued", "running", "cancelling"}
+IMAGE_CLASSIFICATION_RUN_TYPES = (
+    "image_classification_inference",
+    "image_classification_training",
+)
+
+
+class ActiveRunExistsError(ValueError):
+    def __init__(self, active_run: RunRecord) -> None:
+        self.active_run = active_run
+        super().__init__(
+            "Another image classification task is already active: "
+            f"{active_run.run_id} ({active_run.run_type}). "
+            "Cancel it or wait for it to finish."
+        )
 
 
 class RunCreate(BaseModel):
@@ -68,6 +82,10 @@ def _row_to_run(row: aiosqlite.Row) -> RunRecord:
     )
 
 
+def _placeholders(values: tuple[str, ...] | set[str]) -> str:
+    return ", ".join("?" for _ in values)
+
+
 async def create_run(database_path: Path, create: RunCreate) -> RunRecord:
     await initialize_database(database_path)
     run_id = str(uuid4())
@@ -97,6 +115,98 @@ async def create_run(database_path: Path, create: RunCreate) -> RunRecord:
             ),
         )
         await connection.commit()
+
+    run = await get_run(database_path, run_id)
+    if run is None:
+        raise RuntimeError("Created run could not be loaded.")
+    return run
+
+
+async def get_active_run(
+    database_path: Path,
+    run_types: tuple[str, ...] = IMAGE_CLASSIFICATION_RUN_TYPES,
+) -> RunRecord | None:
+    await initialize_database(database_path)
+    async with aiosqlite.connect(database_path) as connection:
+        connection.row_factory = aiosqlite.Row
+        query = f"""
+            SELECT *
+            FROM runs
+            WHERE run_type IN ({_placeholders(run_types)})
+              AND status IN ({_placeholders(UNFINISHED_STATUSES)})
+            ORDER BY created_at ASC
+            LIMIT 1
+            """
+        async with connection.execute(
+            query,
+            (*run_types, *UNFINISHED_STATUSES),
+        ) as cursor:
+            row = await cursor.fetchone()
+
+    if row is None:
+        return None
+    return _row_to_run(row)
+
+
+async def create_run_with_single_active_lock(
+    database_path: Path,
+    create: RunCreate,
+    run_types: tuple[str, ...] = IMAGE_CLASSIFICATION_RUN_TYPES,
+) -> RunRecord:
+    await initialize_database(database_path)
+    run_id = str(uuid4())
+    now = utc_now()
+
+    async with aiosqlite.connect(database_path) as connection:
+        connection.row_factory = aiosqlite.Row
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            active_query = f"""
+                SELECT *
+                FROM runs
+                WHERE run_type IN ({_placeholders(run_types)})
+                  AND status IN ({_placeholders(UNFINISHED_STATUSES)})
+                ORDER BY created_at ASC
+                LIMIT 1
+                """
+            async with connection.execute(
+                active_query,
+                (*run_types, *UNFINISHED_STATUSES),
+            ) as cursor:
+                active_row = await cursor.fetchone()
+
+            if active_row is not None:
+                await connection.rollback()
+                raise ActiveRunExistsError(_row_to_run(active_row))
+
+            await connection.execute(
+                """
+                INSERT INTO runs (
+                    run_id, run_type, status, request_json, hardware_backend, model_ref,
+                    input_path, output_path, total_items, processed_items, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    create.run_type,
+                    create.status,
+                    json.dumps(create.request, sort_keys=True),
+                    create.hardware_backend,
+                    create.model_ref,
+                    create.input_path,
+                    create.output_path,
+                    create.total_items,
+                    create.processed_items,
+                    now,
+                    now,
+                ),
+            )
+            await connection.commit()
+        except Exception:
+            if connection.in_transaction:
+                await connection.rollback()
+            raise
 
     run = await get_run(database_path, run_id)
     if run is None:

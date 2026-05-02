@@ -23,7 +23,7 @@ class DirectorySettingsUpdate(BaseModel):
     device: Literal["auto", "cpu", "cuda", "mps"] = "auto"
 
 
-SETTINGS_KEYS = ("device",)
+SETTINGS_KEYS = ("working_directory", "device")
 
 
 def _stringify(path: Path) -> str:
@@ -65,6 +65,8 @@ async def read_directory_settings(settings: AppSettings) -> DirectorySettings:
             rows = await cursor.fetchall()
 
     for key, value in rows:
+        if key == "working_directory":
+            values = _directory_settings_from_working_directory(Path(value).expanduser())
         if key == "device":
             values["device"] = value
 
@@ -78,7 +80,9 @@ async def write_directory_settings(
 ) -> DirectorySettings:
     await initialize_database(settings.database_path)
     values = update.model_dump()
-    _ensure_directory_settings(fallback_directory_settings(settings))
+    _ensure_directory_settings(
+        _directory_settings_from_working_directory(Path(values["working_directory"]).expanduser())
+    )
 
     async with aiosqlite.connect(settings.database_path) as connection:
         await connection.executemany(

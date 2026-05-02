@@ -387,6 +387,25 @@ function TrainingSummary({
             }
           />
         </div>
+        <label className="mt-4 flex items-center justify-between gap-3 rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-sm">
+          <span>
+            <span className="block font-medium text-slate-100">允许显式下载模型</span>
+            <span className="text-xs text-slate-400">
+              关闭时只使用本地已有模型路径。
+            </span>
+          </span>
+          <input
+            aria-label="允许显式下载模型"
+            checked={trainingRequest.allow_download}
+            className="size-4 accent-cyan-300"
+            type="checkbox"
+            onChange={(event) =>
+              onTrainingRequestChange({
+                allow_download: event.currentTarget.checked,
+              })
+            }
+          />
+        </label>
         {startBlockedReason ? (
           <div className="mt-4 rounded-lg border border-amber-300/20 bg-amber-300/10 px-3 py-2 text-sm text-amber-200">
             {startBlockedReason}

@@ -93,13 +93,21 @@ export function App() {
     () => findModelOption(modelOptions, trainingRequest.base_model_ref),
     [modelOptions, trainingRequest.base_model_ref],
   );
-  const selectedModelAllowsDownload = selectedModelOption?.source === "huggingface";
+  const selectedModelRequiresDownload = Boolean(
+    selectedModelOption?.source === "huggingface" &&
+      selectedModelOption.requires_download &&
+      !trainingRequest.allow_download,
+  );
   const selectedModelCompatibilityError =
     selectedModelOption?.compatible === false
       ? selectedModelOption.compatibility_error ||
         "当前模型不是图片分类模型，请选择兼容模型。"
       : null;
-  const startBlockedReason = selectedModelCompatibilityError;
+  const startBlockedReason = selectedModelCompatibilityError
+    ? selectedModelCompatibilityError
+    : selectedModelRequiresDownload
+      ? "需勾选允许显式下载模型，或选择本地已缓存模型。"
+      : null;
   const activeTaskMode = getActiveTaskMode({
     classificationRun,
     trainingRun,
@@ -145,7 +153,7 @@ export function App() {
       const request: BatchInferenceRequest = {
         model_ref: trainingRequest.base_model_ref,
         model_directory: taskDirectories.model_directory,
-        allow_download: selectedModelAllowsDownload,
+        allow_download: trainingRequest.allow_download,
         input_directory: taskDirectories.dataset_directory,
         output_directory: taskDirectories.output_directory,
         recursive: true,
@@ -356,11 +364,7 @@ export function App() {
     setTrainingError(null);
 
     try {
-      const request = {
-        ...trainingRequest,
-        allow_download: selectedModelAllowsDownload,
-        device: globalDevice,
-      };
+      const request = { ...trainingRequest, device: globalDevice };
       const created = await createImageClassificationTraining(request);
       setTrainingRun(
         createPendingRun(

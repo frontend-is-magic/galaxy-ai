@@ -177,85 +177,6 @@ describe("Galaxy AI home", () => {
     expect(screen.queryByText("~/Models/resnet50")).not.toBeInTheDocument();
   });
 
-  it("allows classification with an HF model without explicit download controls", async () => {
-    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input);
-
-      if (url.startsWith("http://127.0.0.1:8000/models/options")) {
-        return Promise.resolve(jsonResponse(modelOptionsWithoutLocal));
-      }
-
-      if (
-        url === "http://127.0.0.1:8000/image-classification/inference" &&
-        init?.method === "POST"
-      ) {
-        return Promise.resolve(
-          jsonResponse({ run_id: "run-classification-1", status: "queued" }, 202),
-        );
-      }
-
-      if (url === "http://127.0.0.1:8000/runs/run-classification-1/logs") {
-        return Promise.resolve(jsonResponse({ logs: ["允许下载模型"] }));
-      }
-
-      if (url === "http://127.0.0.1:8000/runs/run-classification-1") {
-        return Promise.resolve(
-          jsonResponse({
-            ...runningClassificationRun,
-            model_ref: "microsoft/resnet-50",
-            request: {
-              ...runningClassificationRun.request,
-              model_ref: "microsoft/resnet-50",
-              allow_download: true,
-            },
-          }),
-        );
-      }
-
-      return defaultFetchMock(input);
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    const user = userEvent.setup();
-    render(<App />);
-
-    const modelSelect = await screen.findByRole("combobox", { name: "基础模型" });
-    await waitFor(() => {
-      expect(modelSelect).toHaveValue("microsoft/resnet-50");
-    });
-    expect(
-      screen.queryByText(/需勾选允许显式下载模型，或选择本地已缓存模型/),
-    ).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "开始分类" })).toBeEnabled();
-
-    await user.click(screen.getByRole("button", { name: /更多设置/ }));
-    expect(
-      screen.queryByRole("checkbox", { name: "允许显式下载模型" }),
-    ).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "开始分类" })).toBeEnabled();
-
-    await user.click(screen.getByRole("button", { name: "开始分类" }));
-
-    await waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledWith(
-        "http://127.0.0.1:8000/image-classification/inference",
-        expect.objectContaining({ method: "POST" }),
-      );
-    });
-    const classificationCall = fetchMock.mock.calls.find(
-      ([url]) => url === "http://127.0.0.1:8000/image-classification/inference",
-    );
-    const classificationRequest = JSON.parse(
-      String((classificationCall?.[1] as RequestInit).body),
-    );
-    expect(classificationRequest).toEqual(
-      expect.objectContaining({
-        model_ref: "microsoft/resnet-50",
-        allow_download: true,
-      }),
-    );
-  });
-
   it("falls back to auto when persisted settings do not include a device", async () => {
     const legacySettings = { ...defaultSettings };
     delete (legacySettings as Partial<typeof defaultSettings>).device;
@@ -680,7 +601,29 @@ describe("Galaxy AI home", () => {
     expect(screen.getAllByText("运行中")[0]).toBeInTheDocument();
   });
 
-  it("allows HF training without explicit download controls", async () => {
+  it("blocks HF training until explicit download is enabled", async () => {
+    const fetchMock = vi.fn(defaultFetchMock);
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("tab", { name: "训练模式" }));
+    await user.selectOptions(
+      await screen.findByRole("combobox", { name: "基础模型" }),
+      "microsoft/resnet-50",
+    );
+
+    expect(
+      await screen.findByText(/需勾选允许显式下载模型，或选择本地已缓存模型/),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "开始训练" })).toBeDisabled();
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      "http://127.0.0.1:8000/image-classification/training",
+      expect.anything(),
+    );
+  });
+
+  it("allows HF training after explicit download is enabled", async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
 
@@ -712,10 +655,7 @@ describe("Galaxy AI home", () => {
       await screen.findByRole("combobox", { name: "基础模型" }),
       "microsoft/resnet-50",
     );
-    expect(
-      screen.queryByRole("checkbox", { name: "允许显式下载模型" }),
-    ).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "开始训练" })).toBeEnabled();
+    await user.click(screen.getByRole("checkbox", { name: "允许显式下载模型" }));
     await user.click(screen.getByRole("button", { name: "开始训练" }));
 
     await waitFor(() => {

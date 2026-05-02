@@ -15,6 +15,18 @@ export type TrainingRequest = {
   device: DevicePreference;
 };
 
+export type BatchInferenceRequest = {
+  model_ref: string;
+  model_directory: string | null;
+  allow_download: boolean;
+  input_directory: string;
+  output_directory: string | null;
+  recursive: boolean;
+  batch_size: number;
+  top_k: number;
+  device: DevicePreference;
+};
+
 export type DirectorySettings = {
   model_directory: string;
   output_directory: string;
@@ -34,6 +46,9 @@ export type ModelOption = {
   label: string;
   path: string;
   source: "local" | "huggingface";
+  compatible: boolean;
+  compatibility_error: string | null;
+  requires_download: boolean;
 };
 
 export type ModelOptionsResponse = {
@@ -71,6 +86,17 @@ export type RunRecord = {
   updated_at: string;
   started_at: string | null;
   completed_at: string | null;
+  progress_context?: RunProgressContext | null;
+};
+
+export type RunProgressContext = {
+  scope?: "run" | "epoch";
+  epoch_key?: string | null;
+  current_epoch?: number | null;
+  total_epochs?: number | null;
+  current?: number | null;
+  total?: number | null;
+  label?: string | null;
 };
 
 export type RunLogsResponse = {
@@ -89,6 +115,15 @@ export async function createImageClassificationTraining(
   request: TrainingRequest,
 ): Promise<RunCreateResponse> {
   return apiRequest<RunCreateResponse>("/image-classification/training", {
+    method: "POST",
+    body: JSON.stringify(request),
+  });
+}
+
+export async function createImageClassificationInference(
+  request: BatchInferenceRequest,
+): Promise<RunCreateResponse> {
+  return apiRequest<RunCreateResponse>("/image-classification/inference", {
     method: "POST",
     body: JSON.stringify(request),
   });

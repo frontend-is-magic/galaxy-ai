@@ -1,0 +1,158 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+  font-family:
+    Inter,
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    sans-serif;
+  background: #03060d;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  background: #03060d;
+  overflow-x: hidden;
+}
+
+button {
+  font: inherit;
+}
+
+.toolbar-button {
+  display: inline-grid;
+  width: 2.5rem;
+  height: 2.5rem;
+  place-items: center;
+  border-radius: 0.5rem;
+  color: rgb(226 232 240);
+  transition:
+    background-color 160ms ease,
+    color 160ms ease,
+    border-color 160ms ease;
+}
+
+.toolbar-button:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: white;
+}
+
+.panel-section {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 0.75rem;
+  background: rgba(255, 255, 255, 0.035);
+  padding: 1rem;
+}
+
+.section-title {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: rgb(241 245 249);
+  font-size: 0.95rem;
+  font-weight: 650;
+}
+
+.galaxy-visual-fallback {
+  position: absolute;
+  left: 37%;
+  top: 48%;
+  z-index: 11;
+  width: min(38vw, 35rem);
+  aspect-ratio: 1;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  filter: drop-shadow(0 0 34px rgba(34, 211, 238, 0.24));
+}
+
+.nebula-planet {
+  position: absolute;
+  inset: 24%;
+  border-radius: 9999px;
+  background: radial-gradient(
+      circle at 32% 22%,
+      rgba(255, 255, 255, 0.9),
+      transparent 8%
+    ),
+    radial-gradient(circle at 58% 42%, rgba(236, 72, 153, 0.55), transparent 17%),
+    radial-gradient(circle at 38% 62%, rgba(34, 211, 238, 0.58), transparent 20%),
+    radial-gradient(circle at 64% 72%, rgba(124, 58, 237, 0.72), transparent 23%),
+    linear-gradient(145deg, #1d4ed8, #1e1b4b 48%, #0f1026);
+  box-shadow:
+    inset -2rem -2rem 3rem rgba(0, 0, 0, 0.48),
+    inset 1rem 1rem 2rem rgba(255, 255, 255, 0.16),
+    0 0 0.75rem rgba(125, 211, 252, 0.95),
+    0 0 4rem rgba(34, 211, 238, 0.32);
+}
+
+.nebula-planet::before,
+.nebula-planet::after {
+  position: absolute;
+  content: "";
+  inset: 10% 3%;
+  border-radius: 9999px;
+  border-top: 0.24rem solid rgba(221, 214, 254, 0.5);
+  transform: rotate(-18deg);
+}
+
+.nebula-planet::after {
+  inset: 22% 8%;
+  border-top-color: rgba(34, 211, 238, 0.45);
+  transform: rotate(22deg);
+}
+
+.orbit {
+  position: absolute;
+  border: 1px solid rgba(34, 211, 238, 0.26);
+  border-radius: 50%;
+  transform: rotateX(62deg) rotateZ(-12deg);
+}
+
+.orbit-one {
+  inset: 17%;
+}
+
+.orbit-two {
+  inset: 5%;
+  border-color: rgba(34, 211, 238, 0.18);
+}
+
+.orbit-three {
+  inset: -8%;
+  border-color: rgba(34, 211, 238, 0.38);
+  box-shadow: 1.2rem 0 0 -1rem rgba(34, 211, 238, 0.95);
+}
+
+@media (max-width: 767px) {
+  .toolbar-button {
+    width: 2.25rem;
+    height: 2.25rem;
+  }
+
+  .galaxy-visual-fallback {
+    left: 50%;
+    top: 47%;
+    width: 78vw;
+    opacity: 0.32;
+  }
+}
+
+@media (max-width: 900px) {
+  .task-inspector {
+    left: 1rem;
+    right: auto;
+    width: min(22.375rem, calc(100vw - 2rem));
+    max-width: calc(100vw - 2rem);
+  }
+}

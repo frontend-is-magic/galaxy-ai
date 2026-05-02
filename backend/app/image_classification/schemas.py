@@ -25,7 +25,7 @@ class BatchInferenceRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_input_source(self) -> "BatchInferenceRequest":
-        if (self.input_directory is None) == (not self.input_paths):
+        if self.input_directory is not None and self.input_paths:
             raise ValueError("Provide exactly one of input_directory or input_paths.")
         return self
 
@@ -34,9 +34,8 @@ class TrainingRequest(BaseModel):
     base_model_ref: str
     model_directory: str | None = None
     allow_download: bool = False
-    dataset_directory: str
+    dataset_directory: str | None = None
     output_directory: str | None = None
-    checkpoint_directory: str | None = None
     epochs: int = Field(default=50, ge=1, le=1000)
     batch_size: int = Field(default=8, ge=1, le=256)
     learning_rate: float = Field(default=5e-5, gt=0)

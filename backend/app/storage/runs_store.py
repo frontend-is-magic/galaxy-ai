@@ -273,6 +273,34 @@ async def update_run_status(
     return run
 
 
+async def update_run_progress(
+    database_path: Path,
+    run_id: str,
+    processed_items: int,
+    total_items: int | None = None,
+) -> RunRecord:
+    now = utc_now()
+    assignments = ["processed_items = ?", "updated_at = ?"]
+    values: list[object] = [processed_items, now]
+    if total_items is not None:
+        assignments.append("total_items = ?")
+        values.append(total_items)
+    values.append(run_id)
+
+    await initialize_database(database_path)
+    async with aiosqlite.connect(database_path) as connection:
+        await connection.execute(
+            f"UPDATE runs SET {', '.join(assignments)} WHERE run_id = ?",
+            values,
+        )
+        await connection.commit()
+
+    run = await get_run(database_path, run_id)
+    if run is None:
+        raise ValueError(f"Run not found: {run_id}")
+    return run
+
+
 async def append_run_log(database_path: Path, run_id: str, message: str) -> None:
     await initialize_database(database_path)
     async with aiosqlite.connect(database_path) as connection:

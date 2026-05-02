@@ -36,6 +36,22 @@ Galaxy AI 是一个本地优先的 AI Lab，用于在自己的机器上运行、
 
 `models/`、`outputs/`、`datasets/`、`checkpoints/` 只是默认兜底目录。实际工作目录必须能在应用 Settings 界面中配置。
 
+## 本地启动
+
+克隆仓库后，或依赖发生变化时，先运行初始化脚本：
+
+```bash
+./init.sh
+```
+
+初始化完成后，日常启动本地后端和前端：
+
+```bash
+./start.sh
+```
+
+Windows PowerShell 用户先运行 `./init.ps1`，再运行 `./start.ps1`。
+
 ## 仓库状态
 
 当前仓库只包含初始项目规则和元信息。React 与 FastAPI 脚手架会在后续 `develop` 分支上创建。

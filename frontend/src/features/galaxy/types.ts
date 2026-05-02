@@ -8,7 +8,9 @@ export type HardwareBackend = {
 
 export type TaskStatus = "idle" | "running" | "completed" | "error";
 
-export type TaskMode = "starmap" | "professional";
+export type TaskViewMode = "starmap" | "professional";
+
+export type TaskCapabilityMode = "classification" | "training";
 
 export type TaskPlanet = {
   id: string;

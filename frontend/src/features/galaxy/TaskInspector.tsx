@@ -1,25 +1,30 @@
 import {
   AlertCircle,
   Database,
+  FolderOpen,
+  FolderPlus,
   Gauge,
   Play,
   RotateCcw,
+  Trash2,
   SlidersHorizontal,
   Sparkles,
   Square,
 } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 
 import type {
+  DatasetMode,
+  DatasetPreviewResponse,
   ModelOptionsResponse,
   RunRecord,
   RunStatus,
   TrainingRequest,
 } from "./api";
+import { datasetImageUrl } from "./api";
 import type {
   BatchImageClassificationTask,
   TaskCapabilityMode,
-  TaskDirectories,
   TaskStatus,
 } from "./types";
 
@@ -36,22 +41,24 @@ type TaskInspectorProps = {
   trainingError: string | null;
   modelOptions: ModelOptionsResponse | null;
   modelOptionsError: string | null;
-  taskDirectories: TaskDirectories;
-  isTrainingSubmitting: boolean;
-  isClassificationSubmitting: boolean;
+  classificationDataset: DatasetPreviewResponse | null;
+  trainingDataset: DatasetPreviewResponse | null;
+  datasetError: string | null;
+  isImportingDataset: boolean;
   canStartTask: boolean;
   startBlockedReason: string | null;
   activeTaskMode: TaskCapabilityMode | null;
   onCapabilityModeChange: (mode: TaskCapabilityMode) => void;
   onMoreSettingsToggle: () => void;
   onTrainingRequestChange: (update: Partial<TrainingRequest>) => void;
-  onTaskDirectoryChange: (update: Partial<TaskDirectories>) => void;
   onTaskModelChange: (modelRef: string) => void;
-  onSelectTaskDirectory: (key: keyof TaskDirectories) => void;
   onStartClassification: (batchSize: number) => void;
   onStartTraining: () => void;
   onCancelClassification: () => void;
   onCancelTraining: () => void;
+  onOpenClassificationOutput: (runId: string) => void;
+  onImportDataset: (mode: DatasetMode, label?: string) => void;
+  onClearDataset: (mode: DatasetMode) => Promise<boolean>;
 };
 
 const taskStatusLabel: Record<TaskStatus, string> = {
@@ -61,7 +68,7 @@ const taskStatusLabel: Record<TaskStatus, string> = {
   error: "错误",
 };
 
-const unfinishedRunStatuses = new Set<RunStatus>(["queued", "running", "cancelling"]);
+const cancellableRunStatuses = new Set<RunStatus>(["queued", "running"]);
 const batchSizeOptions = [8, 16, 32, 64];
 
 export function TaskInspector({
@@ -77,22 +84,24 @@ export function TaskInspector({
   trainingError,
   modelOptions,
   modelOptionsError,
-  taskDirectories,
-  isTrainingSubmitting,
-  isClassificationSubmitting,
+  classificationDataset,
+  trainingDataset,
+  datasetError,
+  isImportingDataset,
   canStartTask,
   startBlockedReason,
   activeTaskMode,
   onCapabilityModeChange,
   onMoreSettingsToggle,
   onTrainingRequestChange,
-  onTaskDirectoryChange,
   onTaskModelChange,
-  onSelectTaskDirectory,
   onStartClassification,
   onStartTraining,
   onCancelClassification,
   onCancelTraining,
+  onOpenClassificationOutput,
+  onImportDataset,
+  onClearDataset,
 }: TaskInspectorProps) {
   const isTraining = capabilityMode === "training";
   const [classificationBatchSize, setClassificationBatchSize] = useState(32);
@@ -106,12 +115,6 @@ export function TaskInspector({
       : activeTaskMode === "training"
         ? trainingRun
         : null;
-  const isActiveSubmitting =
-    activeTaskMode === "classification"
-      ? isClassificationSubmitting
-      : activeTaskMode === "training"
-        ? isTrainingSubmitting
-        : false;
 
   function confirmCancel() {
     if (pendingCancelMode === "training") {
@@ -173,11 +176,14 @@ export function TaskInspector({
               classificationRun={classificationRun}
               classificationLogs={classificationLogs}
               classificationError={classificationError}
-              taskDirectories={taskDirectories}
+              dataset={classificationDataset}
+              datasetError={datasetError}
+              isImportingDataset={isImportingDataset}
               startBlockedReason={startBlockedReason}
               onTaskModelChange={onTaskModelChange}
-              onTaskDirectoryChange={onTaskDirectoryChange}
-              onSelectTaskDirectory={onSelectTaskDirectory}
+              onOpenOutput={onOpenClassificationOutput}
+              onImportDataset={() => onImportDataset("classification")}
+              onClearDataset={() => onClearDataset("classification")}
             />
           ) : null}
 
@@ -189,11 +195,13 @@ export function TaskInspector({
               trainingError={trainingError}
               modelOptions={modelOptions}
               modelOptionsError={modelOptionsError}
-              taskDirectories={taskDirectories}
+              dataset={trainingDataset}
+              datasetError={datasetError}
+              isImportingDataset={isImportingDataset}
               onTaskModelChange={onTaskModelChange}
-              onTaskDirectoryChange={onTaskDirectoryChange}
-              onSelectTaskDirectory={onSelectTaskDirectory}
               onTrainingRequestChange={onTrainingRequestChange}
+              onImportDataset={(label) => onImportDataset("training", label)}
+              onClearDataset={() => onClearDataset("training")}
               startBlockedReason={startBlockedReason}
             />
           ) : null}
@@ -207,11 +215,8 @@ export function TaskInspector({
                 task={task}
                 batchSize={classificationBatchSize}
                 confidence={classificationConfidence}
-                taskDirectories={taskDirectories}
                 onBatchSizeChange={setClassificationBatchSize}
                 onConfidenceChange={setClassificationConfidence}
-                onTaskDirectoryChange={onTaskDirectoryChange}
-                onSelectTaskDirectory={onSelectTaskDirectory}
               />
             </MoreSettingsAccordion>
           ) : null}
@@ -222,7 +227,6 @@ export function TaskInspector({
             activeMode={activeTaskMode}
             currentMode={capabilityMode}
             disabled={!canStartTask}
-            isSubmitting={isActiveSubmitting}
             run={activeRun}
             onStart={
               isTraining
@@ -251,11 +255,14 @@ function ClassificationSummary({
   classificationRun,
   classificationLogs,
   classificationError,
-  taskDirectories,
+  dataset,
+  datasetError,
+  isImportingDataset,
   startBlockedReason,
   onTaskModelChange,
-  onTaskDirectoryChange,
-  onSelectTaskDirectory,
+  onOpenOutput,
+  onImportDataset,
+  onClearDataset,
 }: {
   modelOptions: ModelOptionsResponse | null;
   modelOptionsError: string | null;
@@ -263,39 +270,61 @@ function ClassificationSummary({
   classificationRun: RunRecord | null;
   classificationLogs: string[];
   classificationError: string | null;
-  taskDirectories: TaskDirectories;
+  dataset: DatasetPreviewResponse | null;
+  datasetError: string | null;
+  isImportingDataset: boolean;
   startBlockedReason: string | null;
   onTaskModelChange: (modelRef: string) => void;
-  onTaskDirectoryChange: (update: Partial<TaskDirectories>) => void;
-  onSelectTaskDirectory: (key: keyof TaskDirectories) => void;
+  onOpenOutput: (runId: string) => void;
+  onImportDataset: () => void;
+  onClearDataset: () => Promise<boolean>;
 }) {
+  const canOpenOutput =
+    classificationRun?.status === "completed" && Boolean(classificationRun.output_path);
+
   return (
     <div className="space-y-5">
       <p className="text-sm leading-6 text-slate-300">
-        快速启动批量图片分类任务。路径、模型和输出位置全部保留在本机。
+        快速启动批量图片分类任务。模型选择、数据集预览和运行日志全部保留在本机。
       </p>
 
       <TaskSummaryControls
         modelOptions={modelOptions}
         modelOptionsError={modelOptionsError}
         selectedModel={selectedModel}
-        taskDirectories={taskDirectories}
         onModelChange={onTaskModelChange}
-        onTaskDirectoryChange={onTaskDirectoryChange}
-        onSelectTaskDirectory={onSelectTaskDirectory}
       />
       {startBlockedReason ? (
         <div className="rounded-lg border border-amber-300/20 bg-amber-300/10 px-3 py-2 text-sm text-amber-200">
           {startBlockedReason}
         </div>
       ) : null}
+      <DatasetPreviewPanel
+        mode="classification"
+        dataset={dataset}
+        error={datasetError}
+        isImporting={isImportingDataset}
+        onImport={onImportDataset}
+        onClear={onClearDataset}
+      />
       <RunStatusPanel
         title="分类运行日志"
         emptyLogMessage="等待分类运行。"
         run={classificationRun}
         logs={classificationLogs}
         error={classificationError}
-        compact
+        action={
+          canOpenOutput && classificationRun ? (
+            <button
+              className="inline-flex items-center gap-2 rounded-lg border border-cyan-300/25 bg-cyan-300/10 px-3 py-2 text-sm font-semibold text-cyan-100 transition hover:bg-cyan-300/16"
+              type="button"
+              onClick={() => onOpenOutput(classificationRun.run_id)}
+            >
+              <FolderOpen className="size-4" aria-hidden="true" />
+              查看结果
+            </button>
+          ) : null
+        }
       />
     </div>
   );
@@ -308,11 +337,13 @@ function TrainingSummary({
   trainingError,
   modelOptions,
   modelOptionsError,
-  taskDirectories,
+  dataset,
+  datasetError,
+  isImportingDataset,
   onTaskModelChange,
-  onTaskDirectoryChange,
-  onSelectTaskDirectory,
   onTrainingRequestChange,
+  onImportDataset,
+  onClearDataset,
   startBlockedReason,
 }: {
   trainingRequest: TrainingRequest;
@@ -321,13 +352,69 @@ function TrainingSummary({
   trainingError: string | null;
   modelOptions: ModelOptionsResponse | null;
   modelOptionsError: string | null;
-  taskDirectories: TaskDirectories;
+  dataset: DatasetPreviewResponse | null;
+  datasetError: string | null;
+  isImportingDataset: boolean;
   onTaskModelChange: (modelRef: string) => void;
-  onTaskDirectoryChange: (update: Partial<TaskDirectories>) => void;
-  onSelectTaskDirectory: (key: keyof TaskDirectories) => void;
   onTrainingRequestChange: (update: Partial<TrainingRequest>) => void;
+  onImportDataset: (label: string) => void;
+  onClearDataset: () => Promise<boolean>;
   startBlockedReason: string | null;
 }) {
+  const datasetLabels = dataset?.labels.map((group) => group.label) ?? [];
+  const datasetLabelKey = datasetLabels.join("\u0000");
+  const [localLabels, setLocalLabels] = useState<string[]>([]);
+  const [selectedLabel, setSelectedLabel] = useState("");
+  const [newLabel, setNewLabel] = useState("");
+  const selectableLabels = useMemo(
+    () => [
+      ...datasetLabels,
+      ...localLabels.filter((label) => !datasetLabels.includes(label)),
+    ],
+    // datasetLabelKey keeps this memo stable across equivalent backend refreshes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [datasetLabelKey, localLabels],
+  );
+  const activeLabel =
+    selectedLabel && selectableLabels.includes(selectedLabel)
+      ? selectedLabel
+      : selectableLabels[0] || "";
+
+  useEffect(() => {
+    setLocalLabels((current) =>
+      current.filter((label) => !datasetLabels.includes(label)),
+    );
+    if (selectedLabel && !selectableLabels.includes(selectedLabel)) {
+      setSelectedLabel("");
+    }
+    // datasetLabelKey intentionally represents the backend label set.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [datasetLabelKey]);
+
+  function addLabel() {
+    const normalizedLabel = newLabel.trim();
+    if (!normalizedLabel) {
+      return;
+    }
+    setLocalLabels((current) =>
+      selectableLabels.includes(normalizedLabel)
+        ? current
+        : [...current, normalizedLabel],
+    );
+    setSelectedLabel(normalizedLabel);
+    setNewLabel("");
+  }
+
+  async function clearTrainingDataset() {
+    const didClear = await onClearDataset();
+    if (didClear) {
+      setLocalLabels([]);
+      setSelectedLabel("");
+      setNewLabel("");
+    }
+    return didClear;
+  }
+
   return (
     <div className="space-y-5">
       <section className="panel-section">
@@ -336,7 +423,7 @@ function TrainingSummary({
           训练摘要
         </div>
         <p className="mt-3 text-sm leading-6 text-slate-300">
-          本地微调图片分类模型。目录、超参、日志和取消控制都集中在这里。
+          本地微调图片分类模型。超参、数据集、日志和取消控制都集中在这里。
           数据集不会上传。
         </p>
         <div className="mt-4 grid gap-3 text-sm">
@@ -344,14 +431,24 @@ function TrainingSummary({
             modelOptions={modelOptions}
             modelOptionsError={modelOptionsError}
             selectedModel={trainingRequest.base_model_ref}
-            taskDirectories={taskDirectories}
-            includeAdvancedDirectories
             onModelChange={onTaskModelChange}
-            onTaskDirectoryChange={onTaskDirectoryChange}
-            onSelectTaskDirectory={onSelectTaskDirectory}
           />
         </div>
       </section>
+      <DatasetPreviewPanel
+        mode="training"
+        dataset={dataset}
+        error={datasetError}
+        isImporting={isImportingDataset}
+        selectedLabel={activeLabel}
+        labelOptions={selectableLabels}
+        newLabel={newLabel}
+        onNewLabelChange={setNewLabel}
+        onAddLabel={addLabel}
+        onSelectedLabelChange={setSelectedLabel}
+        onImport={() => onImportDataset(activeLabel)}
+        onClear={clearTrainingDataset}
+      />
       <section className="panel-section">
         <div className="section-title">
           <SlidersHorizontal className="size-4 text-cyan-300" aria-hidden="true" />
@@ -387,25 +484,6 @@ function TrainingSummary({
             }
           />
         </div>
-        <label className="mt-4 flex items-center justify-between gap-3 rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-sm">
-          <span>
-            <span className="block font-medium text-slate-100">允许显式下载模型</span>
-            <span className="text-xs text-slate-400">
-              关闭时只使用本地已有模型路径。
-            </span>
-          </span>
-          <input
-            aria-label="允许显式下载模型"
-            checked={trainingRequest.allow_download}
-            className="size-4 accent-cyan-300"
-            type="checkbox"
-            onChange={(event) =>
-              onTrainingRequestChange({
-                allow_download: event.currentTarget.checked,
-              })
-            }
-          />
-        </label>
         {startBlockedReason ? (
           <div className="mt-4 rounded-lg border border-amber-300/20 bg-amber-300/10 px-3 py-2 text-sm text-amber-200">
             {startBlockedReason}
@@ -427,35 +505,17 @@ function ClassificationAdvanced({
   task,
   batchSize,
   confidence,
-  taskDirectories,
   onBatchSizeChange,
   onConfidenceChange,
-  onTaskDirectoryChange,
-  onSelectTaskDirectory,
 }: {
   task: BatchImageClassificationTask;
   batchSize: number;
   confidence: number;
-  taskDirectories: TaskDirectories;
   onBatchSizeChange: (value: number) => void;
   onConfidenceChange: (value: number) => void;
-  onTaskDirectoryChange: (update: Partial<TaskDirectories>) => void;
-  onSelectTaskDirectory: (key: keyof TaskDirectories) => void;
 }) {
   return (
     <div className="grid gap-4 text-sm">
-      <DirectoryField
-        label="模型目录"
-        value={taskDirectories.model_directory}
-        onChange={(value) => onTaskDirectoryChange({ model_directory: value })}
-        onSelect={() => onSelectTaskDirectory("model_directory")}
-      />
-      <DirectoryField
-        label="Checkpoint目录"
-        value={taskDirectories.checkpoint_directory}
-        onChange={(value) => onTaskDirectoryChange({ checkpoint_directory: value })}
-        onSelect={() => onSelectTaskDirectory("checkpoint_directory")}
-      />
       <BatchSizeSelect label="批大小" value={batchSize} onChange={onBatchSizeChange} />
       <NumberField
         label="置信度阈值"
@@ -472,6 +532,290 @@ function ClassificationAdvanced({
       </div>
     </div>
   );
+}
+
+function DatasetPreviewPanel({
+  mode,
+  dataset,
+  error,
+  isImporting,
+  selectedLabel,
+  labelOptions,
+  newLabel,
+  onNewLabelChange,
+  onAddLabel,
+  onSelectedLabelChange,
+  onImport,
+  onClear,
+}: {
+  mode: DatasetMode;
+  dataset: DatasetPreviewResponse | null;
+  error: string | null;
+  isImporting: boolean;
+  selectedLabel?: string;
+  labelOptions?: string[];
+  newLabel?: string;
+  onNewLabelChange?: (value: string) => void;
+  onAddLabel?: () => void;
+  onSelectedLabelChange?: (label: string) => void;
+  onImport: () => void;
+  onClear: () => void | Promise<boolean>;
+}) {
+  const [isConfirmingClear, setIsConfirmingClear] = useState(false);
+  const title = mode === "training" ? "训练数据集" : "分类数据集";
+  const importLabel = mode === "training" ? "添加训练图片" : "添加分类图片";
+  const clearLabel = mode === "training" ? "删除训练数据集" : "删除分类数据集";
+  const datasetLabels = dataset?.labels.map((group) => group.label) ?? [];
+  const selectableLabels = labelOptions ?? datasetLabels;
+  const selectedLabelGroup = dataset?.labels.find(
+    (group) => group.label === selectedLabel,
+  );
+  const canImport = mode !== "training" || Boolean(selectedLabel);
+
+  return (
+    <section className="panel-section">
+      <div className="flex items-center justify-between gap-3">
+        <div className="section-title">
+          <Database className="size-4 text-cyan-300" aria-hidden="true" />
+          {title}
+        </div>
+        <span className="text-xs font-medium text-slate-400">
+          {dataset?.count ?? 0} 张图片
+        </span>
+      </div>
+
+      {mode === "training" ? (
+        <div className="mt-4 grid gap-3">
+          <div className="flex flex-wrap gap-2" aria-label="训练 label 列表">
+            {selectableLabels.length > 0 ? (
+              selectableLabels.map((label) => (
+                <button
+                  key={label}
+                  aria-pressed={selectedLabel === label}
+                  className={`rounded-full border px-3 py-1.5 text-sm font-semibold transition ${
+                    selectedLabel === label
+                      ? "border-cyan-300/45 bg-cyan-300/16 text-cyan-100"
+                      : "border-white/10 bg-white/[0.045] text-slate-300 hover:bg-white/[0.08]"
+                  }`}
+                  type="button"
+                  onClick={() => onSelectedLabelChange?.(label)}
+                >
+                  {label}
+                </button>
+              ))
+            ) : (
+              <span className="text-sm text-slate-400">
+                先添加一个 label，再导入训练图片。
+              </span>
+            )}
+          </div>
+          <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+            <label className="grid gap-1.5 text-sm">
+              <span className="text-slate-400">新增 label</span>
+              <input
+                aria-label="新增 label"
+                className="min-w-0 rounded-lg border border-white/10 bg-white/[0.045] px-3 py-2 text-slate-100 outline-none transition focus:border-cyan-300/45 focus:ring-2 focus:ring-cyan-300/15"
+                placeholder="例如 cat"
+                value={newLabel ?? ""}
+                onChange={(event) => onNewLabelChange?.(event.currentTarget.value)}
+              />
+            </label>
+            <button
+              className="self-end rounded-lg border border-white/10 bg-white/[0.055] px-3 py-2 text-sm font-semibold text-slate-100 transition hover:bg-white/[0.09] disabled:cursor-not-allowed disabled:opacity-60"
+              type="button"
+              disabled={!newLabel?.trim()}
+              onClick={onAddLabel}
+            >
+              添加 label
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      <div className="mt-4 flex flex-wrap gap-2">
+        <button
+          className="inline-flex items-center gap-2 rounded-lg border border-cyan-300/25 bg-cyan-300/10 px-3 py-2 text-sm font-semibold text-cyan-100 transition hover:bg-cyan-300/16 disabled:cursor-not-allowed disabled:opacity-60"
+          type="button"
+          disabled={isImporting || !canImport}
+          onClick={onImport}
+        >
+          <FolderPlus className="size-4" aria-hidden="true" />
+          {isImporting ? "导入中" : importLabel}
+        </button>
+        <button
+          className="inline-flex items-center gap-2 rounded-lg border border-amber-300/25 bg-amber-300/10 px-3 py-2 text-sm font-semibold text-amber-100 transition hover:bg-amber-300/16"
+          type="button"
+          onClick={() => setIsConfirmingClear(true)}
+        >
+          <Trash2 className="size-4" aria-hidden="true" />
+          {clearLabel}
+        </button>
+      </div>
+
+      {error ? (
+        <div className="mt-4 rounded-lg border border-amber-300/20 bg-amber-300/10 px-3 py-2 text-sm text-amber-200">
+          {error}
+        </div>
+      ) : null}
+      {mode === "training" && !canImport ? (
+        <p className="mt-3 text-sm text-slate-400">先添加或选择 label 后再导入图片。</p>
+      ) : null}
+
+      <div
+        className="mt-4 max-h-80 overflow-y-auto rounded-lg border border-white/10 bg-black/24 p-3"
+        data-testid="dataset-preview-scroll"
+      >
+        {mode === "classification" ? (
+          <ImageListPreview
+            emptyMessage="分类数据集为空。"
+            items={dataset?.items ?? []}
+            mode="classification"
+          />
+        ) : (
+          <ImageListPreview
+            emptyMessage={
+              selectedLabel ? `${selectedLabel} 暂无图片。` : "训练数据集为空。"
+            }
+            items={selectedLabelGroup?.items ?? []}
+            label={selectedLabel}
+            mode="training"
+          />
+        )}
+      </div>
+
+      {isConfirmingClear ? (
+        <ClearDatasetDialog
+          mode={mode}
+          onClose={() => setIsConfirmingClear(false)}
+          onConfirm={() => {
+            setIsConfirmingClear(false);
+            void onClear();
+          }}
+        />
+      ) : null}
+    </section>
+  );
+}
+
+function ImageListPreview({
+  mode,
+  label,
+  items,
+  emptyMessage,
+}: {
+  mode: DatasetMode;
+  label?: string;
+  items: DatasetPreviewResponse["items"];
+  emptyMessage: string;
+}) {
+  if (items.length === 0) {
+    return <p className="text-sm text-slate-400">{emptyMessage}</p>;
+  }
+
+  return (
+    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+      {items.map((item) => (
+        <DatasetThumbnail
+          key={item.relative_path}
+          item={item}
+          label={label}
+          mode={mode}
+        />
+      ))}
+    </div>
+  );
+}
+
+function DatasetThumbnail({
+  mode,
+  label,
+  item,
+}: {
+  mode: DatasetMode;
+  label?: string;
+  item: DatasetPreviewResponse["items"][number];
+}) {
+  const [hasImageError, setHasImageError] = useState(false);
+
+  return (
+    <div className="min-w-0 rounded-lg border border-white/10 bg-white/[0.035] p-2">
+      {hasImageError ? (
+        <div className="grid aspect-square w-full place-items-center rounded-md border border-white/10 bg-black/24 text-xs text-slate-500">
+          预览不可用
+        </div>
+      ) : (
+        <img
+          alt={item.file_name}
+          className="aspect-square w-full rounded-md object-cover"
+          loading="lazy"
+          src={datasetImageUrl({
+            mode,
+            label,
+            relativePath: item.relative_path,
+          })}
+          onError={() => setHasImageError(true)}
+        />
+      )}
+      <div className="mt-2 min-w-0">
+        <div className="truncate text-xs font-medium text-slate-200">
+          {item.file_name}
+        </div>
+        <div className="mt-1 text-[11px] text-slate-500">{formatBytes(item.size)}</div>
+      </div>
+    </div>
+  );
+}
+
+function ClearDatasetDialog({
+  mode,
+  onClose,
+  onConfirm,
+}: {
+  mode: DatasetMode;
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  const title = mode === "training" ? "确认删除训练数据集" : "确认删除分类数据集";
+
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/55 px-4 backdrop-blur-sm">
+      <div
+        aria-labelledby="clear-dataset-title"
+        className="w-full max-w-sm rounded-xl border border-white/12 bg-[#07111c] p-5 shadow-[0_24px_80px_rgba(0,0,0,0.6)]"
+        role="dialog"
+      >
+        <h3 id="clear-dataset-title" className="text-lg font-semibold text-white">
+          {title}
+        </h3>
+        <p className="mt-3 text-sm leading-6 text-slate-300">
+          这会清空当前模式下已导入的全部图片。
+        </p>
+        <div className="mt-5 grid grid-cols-2 gap-3">
+          <button
+            className="rounded-lg border border-white/10 bg-white/[0.055] px-4 py-3 text-sm font-semibold text-slate-100 transition hover:bg-white/[0.09]"
+            type="button"
+            onClick={onClose}
+          >
+            取消
+          </button>
+          <button
+            className="rounded-lg border border-amber-300/30 bg-amber-300/12 px-4 py-3 text-sm font-semibold text-amber-100 transition hover:bg-amber-300/18"
+            type="button"
+            onClick={onConfirm}
+          >
+            确认删除
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function formatBytes(size: number): string {
+  if (size < 1024) {
+    return `${size} B`;
+  }
+  return `${(size / 1024).toFixed(1)} KB`;
 }
 
 function MoreSettingsAccordion({
@@ -508,20 +852,12 @@ function TaskSummaryControls({
   modelOptions,
   modelOptionsError,
   selectedModel,
-  taskDirectories,
-  includeAdvancedDirectories = false,
   onModelChange,
-  onTaskDirectoryChange,
-  onSelectTaskDirectory,
 }: {
   modelOptions: ModelOptionsResponse | null;
   modelOptionsError: string | null;
   selectedModel: string;
-  taskDirectories: TaskDirectories;
-  includeAdvancedDirectories?: boolean;
   onModelChange: (modelRef: string) => void;
-  onTaskDirectoryChange: (update: Partial<TaskDirectories>) => void;
-  onSelectTaskDirectory: (key: keyof TaskDirectories) => void;
 }) {
   return (
     <div className="grid gap-3">
@@ -572,41 +908,6 @@ function TaskSummaryControls({
           {modelOptionsError}
         </div>
       ) : null}
-
-      <DirectoryField
-        label="工作目录"
-        value={taskDirectories.working_directory}
-        onChange={(value) => onTaskDirectoryChange({ working_directory: value })}
-        onSelect={() => onSelectTaskDirectory("working_directory")}
-      />
-      <DirectoryField
-        label="数据集目录"
-        value={taskDirectories.dataset_directory}
-        onChange={(value) => onTaskDirectoryChange({ dataset_directory: value })}
-        onSelect={() => onSelectTaskDirectory("dataset_directory")}
-      />
-      <DirectoryField
-        label="输出目录"
-        value={taskDirectories.output_directory}
-        onChange={(value) => onTaskDirectoryChange({ output_directory: value })}
-        onSelect={() => onSelectTaskDirectory("output_directory")}
-      />
-      {includeAdvancedDirectories ? (
-        <>
-          <DirectoryField
-            label="模型目录"
-            value={taskDirectories.model_directory}
-            onChange={(value) => onTaskDirectoryChange({ model_directory: value })}
-            onSelect={() => onSelectTaskDirectory("model_directory")}
-          />
-          <DirectoryField
-            label="Checkpoint目录"
-            value={taskDirectories.checkpoint_directory}
-            onChange={(value) => onTaskDirectoryChange({ checkpoint_directory: value })}
-            onSelect={() => onSelectTaskDirectory("checkpoint_directory")}
-          />
-        </>
-      ) : null}
     </div>
   );
 }
@@ -629,31 +930,27 @@ function RunStatusPanel({
   run,
   logs,
   error,
-  compact = false,
+  action,
 }: {
   title: string;
   emptyLogMessage: string;
   run: RunRecord | null;
   logs: string[];
   error: string | null;
-  compact?: boolean;
+  action?: ReactNode;
 }) {
   return (
     <section className="panel-section">
-      <div className="section-title">
-        <RotateCcw className="size-4 text-cyan-300" aria-hidden="true" />
-        {title}
+      <div className="flex items-center justify-between gap-3">
+        <div className="section-title">
+          <RotateCcw className="size-4 text-cyan-300" aria-hidden="true" />
+          {title}
+        </div>
+        {action}
       </div>
 
       <div className="mt-4 grid gap-3 text-sm">
         <InfoRow label="run_id" value={run?.run_id ?? "尚未创建"} />
-        <InfoRow label="输出路径" value={run?.output_path ?? "--"} />
-        {!compact ? (
-          <InfoRow
-            label="Checkpoint"
-            value={String(run?.request?.checkpoint_directory ?? "--")}
-          />
-        ) : null}
       </div>
 
       {error || run?.error_message ? (
@@ -681,7 +978,6 @@ function TaskActionButton({
   activeMode,
   currentMode,
   disabled,
-  isSubmitting,
   run,
   onStart,
   onRequestCancel,
@@ -689,58 +985,37 @@ function TaskActionButton({
   activeMode: TaskCapabilityMode | null;
   currentMode: TaskCapabilityMode;
   disabled: boolean;
-  isSubmitting: boolean;
   run: RunRecord | null;
   onStart: () => void;
   onRequestCancel: (mode: TaskCapabilityMode) => void;
 }) {
   if (activeMode) {
     const progress = getRunProgress(run, activeMode);
-    const isCrossModeLock = activeMode !== currentMode;
     const canRequestCancel =
-      Boolean(run) && run !== null && unfinishedRunStatuses.has(run.status);
+      Boolean(run) && run !== null && cancellableRunStatuses.has(run.status);
     const actionLabel = activeMode === "training" ? "终止训练" : "终止分类";
-    const progressLabel = activeMode === "training" ? "训练当前轮次进度" : "分类进度";
+    const progressText = `${progress.current}/${progress.total}`;
 
     return (
-      <button
-        aria-label={actionLabel}
-        className="group w-full overflow-hidden rounded-lg border border-red-300/35 bg-red-500/18 px-5 py-4 text-left shadow-[0_0_34px_rgba(248,113,113,0.2)] transition hover:bg-red-500/24 focus:outline-none focus:ring-2 focus:ring-red-100 disabled:cursor-not-allowed disabled:opacity-70"
-        type="button"
-        disabled={!canRequestCancel}
-        onClick={() => onRequestCancel(activeMode)}
-      >
-        <span className="flex items-center justify-between gap-3">
-          <span className="inline-flex min-w-0 items-center gap-3 text-base font-semibold text-red-100">
-            <Square className="size-5 shrink-0" aria-hidden="true" />
-            <span className="truncate">{actionLabel}</span>
-          </span>
-          <span className="shrink-0 text-sm font-semibold text-red-100">
-            {progress.percent}%
-          </span>
-        </span>
-        <span className="mt-2 block text-sm text-red-100/82">
-          {formatActionSubtitle({
-            activeMode,
-            isCrossModeLock,
-            isSubmitting,
-            progress,
-          })}
-        </span>
-        <span
-          aria-label={progressLabel}
-          aria-valuemax={100}
-          aria-valuemin={0}
-          aria-valuenow={progress.percent}
-          className="mt-3 block h-2 overflow-hidden rounded-full bg-red-950/70"
-          role="progressbar"
+      <div className="grid gap-2">
+        {activeMode === "training" ? (
+          <div className="text-center text-xs font-medium text-slate-400">
+            {formatTrainingEpochLabel(run)}
+          </div>
+        ) : null}
+        <button
+          className="inline-flex w-full items-center justify-center gap-3 rounded-lg bg-red-500 px-5 py-4 text-base font-semibold text-red-50 shadow-[0_0_34px_rgba(248,113,113,0.28)] transition hover:bg-red-400 focus:outline-none focus:ring-2 focus:ring-red-100 disabled:cursor-not-allowed disabled:opacity-70"
+          type="button"
+          disabled={!canRequestCancel}
+          onClick={() => onRequestCancel(activeMode)}
         >
-          <span
-            className="block h-full rounded-full bg-red-200 transition-all"
-            style={{ width: `${progress.percent}%` }}
-          />
-        </span>
-      </button>
+          <Square className="size-5 fill-current" aria-hidden="true" />
+          <span>{actionLabel}</span>
+          <span className="font-mono text-sm font-semibold text-red-50/90">
+            {progressText}
+          </span>
+        </button>
+      </div>
     );
   }
 
@@ -764,16 +1039,9 @@ function getRunProgress(
   run: RunRecord | null,
   mode: TaskCapabilityMode,
 ): { current: number; total: number; percent: number } {
-  const context = run?.progress_context;
-  const usesEpochContext =
-    mode === "training" &&
-    context?.scope === "epoch" &&
-    typeof context.current === "number" &&
-    typeof context.total === "number";
-  const current = usesEpochContext
-    ? (context.current ?? 0)
-    : (run?.processed_items ?? 0);
-  const total = usesEpochContext ? (context.total ?? 0) : (run?.total_items ?? 0);
+  void mode;
+  const current = run?.processed_items ?? 0;
+  const total = run?.total_items ?? 0;
   const percent = total > 0 ? Math.round((current / total) * 100) : 0;
 
   return {
@@ -783,32 +1051,21 @@ function getRunProgress(
   };
 }
 
-function formatActionSubtitle({
-  activeMode,
-  isCrossModeLock,
-  isSubmitting,
-  progress,
-}: {
-  activeMode: TaskCapabilityMode;
-  isCrossModeLock: boolean;
-  isSubmitting: boolean;
-  progress: { current: number; total: number };
-}) {
-  if (isSubmitting && progress.total === 0) {
-    return activeMode === "training" ? "训练提交中" : "分类提交中";
-  }
+function formatTrainingEpochLabel(run: RunRecord | null): string {
+  const context = run?.progress_context;
+  const currentEpoch =
+    typeof context?.current_epoch === "number" ? context.current_epoch : null;
+  const totalEpochs =
+    typeof context?.total_epochs === "number"
+      ? context.total_epochs
+      : getNumericRequestValue(run, "epochs");
 
-  if (isCrossModeLock) {
-    return activeMode === "training"
-      ? "训练运行中，分类已锁定"
-      : "分类运行中，训练已锁定";
-  }
+  return `训练轮次：${currentEpoch ?? "--"} / ${totalEpochs ?? "--"}`;
+}
 
-  if (activeMode === "training") {
-    return `当前训练轮次进度 · ${progress.current} / ${progress.total}`;
-  }
-
-  return `分类运行中 · ${progress.current} / ${progress.total}`;
+function getNumericRequestValue(run: RunRecord | null, key: string): number | null {
+  const value = run?.request?.[key];
+  return typeof value === "number" ? value : null;
 }
 
 function CancelRunDialog({
@@ -833,7 +1090,7 @@ function CancelRunDialog({
           {title}
         </h3>
         <p className="mt-3 text-sm leading-6 text-slate-300">
-          已提交的本地运行会收到取消请求，正在写入的日志和输出目录会保留。
+          已提交的本地运行会收到取消请求，已经写入的日志会保留。
         </p>
         <div className="mt-5 grid grid-cols-2 gap-3">
           <button
@@ -941,40 +1198,6 @@ function InfoRow({
         ) : null}
       </div>
     </div>
-  );
-}
-
-function DirectoryField({
-  label,
-  value,
-  onChange,
-  onSelect,
-}: {
-  label: string;
-  value: string;
-  onChange: (value: string) => void;
-  onSelect: () => void;
-}) {
-  return (
-    <label className="grid gap-2 text-sm">
-      <span className="text-slate-400">{label}</span>
-      <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-2">
-        <input
-          className="min-w-0 rounded-lg border border-white/10 bg-white/[0.035] px-3 py-2 text-slate-400 outline-none"
-          disabled
-          value={value}
-          onChange={(event) => onChange(event.currentTarget.value)}
-        />
-        <button
-          aria-label={`选择${label}`}
-          className="rounded-lg border border-white/10 bg-white/[0.055] px-3 py-2 text-xs font-semibold text-slate-200 transition hover:bg-white/[0.09]"
-          type="button"
-          onClick={onSelect}
-        >
-          选择
-        </button>
-      </div>
-    </label>
   );
 }
 

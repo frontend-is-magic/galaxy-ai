@@ -27,12 +27,52 @@ export type BatchInferenceRequest = {
   device: DevicePreference;
 };
 
+export type DatasetMode = "classification" | "training";
+
+export type DatasetImageItem = {
+  file_name: string;
+  relative_path: string;
+  size: number;
+};
+
+export type DatasetLabelGroup = {
+  label: string;
+  count: number;
+  items: DatasetImageItem[];
+};
+
+export type DatasetPreviewResponse = {
+  mode: DatasetMode;
+  count: number;
+  items: DatasetImageItem[];
+  labels: DatasetLabelGroup[];
+};
+
+export type DatasetImportFile = {
+  file: File;
+  relativePath: string;
+};
+
+export type DatasetImportResponse = {
+  mode: DatasetMode;
+  imported_count: number;
+};
+
+export type DatasetClearResponse = {
+  mode: DatasetMode;
+  deleted_count: number;
+};
+
 export type DirectorySettings = {
   model_directory: string;
   output_directory: string;
   dataset_directory: string;
   checkpoint_directory: string;
   working_directory: string;
+  classification_dataset_directory?: string;
+  classification_output_directory?: string;
+  training_dataset_directory?: string;
+  training_output_directory?: string;
   device: DevicePreference;
   database_path: string;
 };
@@ -103,13 +143,22 @@ export type RunLogsResponse = {
   logs: string[];
 };
 
+export type OpenRunOutputResponse = {
+  run_id: string;
+  output_path: string;
+  opened: boolean;
+};
+
 export type RuntimeHardwareResponse = {
   active_backend: string;
   torch_available: boolean;
   backends: Record<string, { available: boolean; label?: string }>;
 };
 
-const apiBaseUrl = import.meta.env.VITE_GALAXY_API_BASE_URL || "http://127.0.0.1:8000";
+const apiHost = import.meta.env.GALAXY_AI_HOST || "127.0.0.1";
+const apiPort = import.meta.env.GALAXY_AI_PORT || "8000";
+const apiBaseUrl =
+  import.meta.env.VITE_GALAXY_API_BASE_URL || `http://${apiHost}:${apiPort}`;
 
 export async function createImageClassificationTraining(
   request: TrainingRequest,
@@ -143,6 +192,12 @@ export async function cancelRun(runId: string): Promise<RunCreateResponse> {
   });
 }
 
+export async function openRunOutput(runId: string): Promise<OpenRunOutputResponse> {
+  return apiRequest<OpenRunOutputResponse>(`/runs/${runId}/open-output`, {
+    method: "POST",
+  });
+}
+
 export async function getSettings(): Promise<DirectorySettings> {
   return apiRequest<DirectorySettings>("/settings");
 }
@@ -167,13 +222,79 @@ export async function getRuntimeHardware(): Promise<RuntimeHardwareResponse> {
   return apiRequest<RuntimeHardwareResponse>("/runtime/hardware");
 }
 
+export async function getImageClassificationDataset(
+  mode: DatasetMode,
+): Promise<DatasetPreviewResponse> {
+  const params = new URLSearchParams({ mode });
+  return apiRequest<DatasetPreviewResponse>(
+    `/image-classification/datasets?${params.toString()}`,
+  );
+}
+
+export async function importImageClassificationDataset({
+  mode,
+  label,
+  files,
+}: {
+  mode: DatasetMode;
+  label?: string;
+  files: DatasetImportFile[];
+}): Promise<DatasetImportResponse> {
+  const body = new FormData();
+  body.append("mode", mode);
+  if (label) {
+    body.append("label", label);
+  }
+  for (const item of files) {
+    body.append("relative_paths[]", item.relativePath);
+    body.append("files", item.file, item.file.name);
+  }
+
+  return apiRequest<DatasetImportResponse>("/image-classification/datasets/import", {
+    method: "POST",
+    body,
+  });
+}
+
+export async function clearImageClassificationDataset(
+  mode: DatasetMode,
+): Promise<DatasetClearResponse> {
+  const params = new URLSearchParams({ mode });
+  return apiRequest<DatasetClearResponse>(
+    `/image-classification/datasets?${params.toString()}`,
+    { method: "DELETE" },
+  );
+}
+
+export function datasetImageUrl({
+  mode,
+  relativePath,
+  label,
+}: {
+  mode: DatasetMode;
+  relativePath: string;
+  label?: string;
+}): string {
+  const params = new URLSearchParams({
+    mode,
+    relative_path: relativePath,
+  });
+  if (label) {
+    params.set("label", label);
+  }
+  return `${apiBaseUrl}/image-classification/datasets/image?${params.toString()}`;
+}
+
 async function apiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const isFormData = init.body instanceof FormData;
   const response = await fetch(`${apiBaseUrl}${path}`, {
     ...init,
-    headers: {
-      "Content-Type": "application/json",
-      ...init.headers,
-    },
+    headers: isFormData
+      ? init.headers
+      : {
+          "Content-Type": "application/json",
+          ...init.headers,
+        },
   });
 
   if (!response.ok) {

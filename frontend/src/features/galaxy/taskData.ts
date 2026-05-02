@@ -1,5 +1,60 @@
 import type { BatchImageClassificationTask } from "./types";
 import type { TrainingRequest } from "./api";
+import type { TaskCapabilityMode, TaskDirectories } from "./types";
+
+function envString(key: keyof ImportMetaEnv, fallback: string): string {
+  return import.meta.env[key] || fallback;
+}
+
+export const defaultNebulaWorkspaceDirectory = envString(
+  "GALAXY_AI_WORKING_DIRECTORY",
+  "~/Documents/galaxy-ai/nebula-sorter",
+);
+
+export const defaultModelDirectory = envString(
+  "GALAXY_AI_MODEL_DIRECTORY",
+  `${defaultNebulaWorkspaceDirectory}/models`,
+);
+
+export const defaultClassificationDatasetDirectory = envString(
+  "GALAXY_AI_CLASSIFICATION_DATASET_DIRECTORY",
+  `${defaultNebulaWorkspaceDirectory}/classification/datasets`,
+);
+
+export const defaultClassificationOutputDirectory = envString(
+  "GALAXY_AI_CLASSIFICATION_OUTPUT_DIRECTORY",
+  `${defaultNebulaWorkspaceDirectory}/classification/outputs`,
+);
+
+export const defaultTrainingDatasetDirectory = envString(
+  "GALAXY_AI_TRAINING_DATASET_DIRECTORY",
+  `${defaultNebulaWorkspaceDirectory}/training/datasets`,
+);
+
+export const defaultTrainingOutputDirectory = envString(
+  "GALAXY_AI_TRAINING_OUTPUT_DIRECTORY",
+  `${defaultNebulaWorkspaceDirectory}/training/outputs`,
+);
+
+export const defaultTrainingCheckpointDirectory = `${defaultNebulaWorkspaceDirectory}/training/checkpoints`;
+
+export function defaultTaskDirectoriesForMode(
+  mode: TaskCapabilityMode,
+): TaskDirectories {
+  return {
+    working_directory: defaultNebulaWorkspaceDirectory,
+    model_directory: defaultModelDirectory,
+    dataset_directory:
+      mode === "training"
+        ? defaultTrainingDatasetDirectory
+        : defaultClassificationDatasetDirectory,
+    output_directory:
+      mode === "training"
+        ? defaultTrainingOutputDirectory
+        : defaultClassificationOutputDirectory,
+    checkpoint_directory: defaultTrainingCheckpointDirectory,
+  };
+}
 
 export const nebulaSorterTask: BatchImageClassificationTask = {
   id: "nebula-sorter",
@@ -14,10 +69,10 @@ export const nebulaSorterTask: BatchImageClassificationTask = {
     device_name: "本机图形处理器",
   },
   model_path: "",
-  working_directory: "~/Projects/NebulaSorter",
-  model_directory: "~/Projects/NebulaSorter/models",
-  input_directory: "~/Projects/NebulaSorter/input",
-  output_directory: "~/Projects/NebulaSorter/output",
+  working_directory: defaultNebulaWorkspaceDirectory,
+  model_directory: defaultModelDirectory,
+  input_directory: defaultClassificationDatasetDirectory,
+  output_directory: defaultClassificationOutputDirectory,
   supported_formats: ["jpg", "jpeg", "png", "bmp", "webp"],
   total_images: 12842,
   processed_images: 0,
@@ -27,11 +82,11 @@ export const nebulaSorterTask: BatchImageClassificationTask = {
 
 export const defaultTrainingRequest: TrainingRequest = {
   base_model_ref: "",
-  model_directory: "~/Projects/NebulaSorter/models",
+  model_directory: defaultModelDirectory,
   allow_download: false,
-  dataset_directory: "~/Datasets/NebulaSorter",
-  output_directory: "~/Projects/NebulaSorter/output",
-  checkpoint_directory: "~/Projects/NebulaSorter/checkpoints",
+  dataset_directory: defaultTrainingDatasetDirectory,
+  output_directory: defaultTrainingOutputDirectory,
+  checkpoint_directory: defaultTrainingCheckpointDirectory,
   epochs: 50,
   batch_size: 8,
   learning_rate: 0.00005,

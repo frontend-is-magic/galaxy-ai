@@ -1,22 +1,29 @@
-import { Save, Settings, X } from "lucide-react";
+import { Settings, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { GalaxyCanvas } from "./features/galaxy/GalaxyCanvas";
 import { TaskInspector } from "./features/galaxy/TaskInspector";
 import {
   cancelRun,
+  clearImageClassificationDataset,
   createImageClassificationInference,
   createImageClassificationTraining,
+  getImageClassificationDataset,
   getModelOptions,
   getRun,
   getRunLogs,
   getRuntimeHardware,
   getSettings,
-  updateSettings,
+  importImageClassificationDataset,
+  openRunOutput,
 } from "./features/galaxy/api";
 import type {
   BatchInferenceRequest,
+  DatasetImportFile,
+  DatasetPreviewResponse,
+  DatasetMode,
   DevicePreference,
+  DirectorySettings,
   ModelOption,
   ModelOptionsResponse,
   RunRecord,
@@ -24,23 +31,19 @@ import type {
   RuntimeHardwareResponse,
   TrainingRequest,
 } from "./features/galaxy/api";
-import { defaultTrainingRequest, nebulaSorterTask } from "./features/galaxy/taskData";
-import type {
-  TaskCapabilityMode,
-  TaskDirectories,
-  TaskStatus,
-} from "./features/galaxy/types";
+import {
+  defaultTaskDirectoriesForMode,
+  defaultTrainingRequest,
+  nebulaSorterTask,
+} from "./features/galaxy/taskData";
+import type { TaskCapabilityMode, TaskStatus } from "./features/galaxy/types";
+import type { TaskDirectories } from "./features/galaxy/types";
 
 const unfinishedRunStatuses = new Set<RunStatus>(["queued", "running", "cancelling"]);
+const cancellableRunStatuses = new Set<RunStatus>(["queued", "running"]);
 const selectableDevices: DevicePreference[] = ["auto", "cpu", "cuda", "mps"];
-
-const defaultTaskDirectories: TaskDirectories = {
-  working_directory: nebulaSorterTask.working_directory,
-  model_directory: nebulaSorterTask.model_directory,
-  dataset_directory: defaultTrainingRequest.dataset_directory,
-  output_directory: nebulaSorterTask.output_directory,
-  checkpoint_directory: defaultTrainingRequest.checkpoint_directory ?? "",
-};
+const modelOptionsRefreshIntervalMs = 2500;
+const supportedImportExtensions = new Set(["jpg", "jpeg", "png", "bmp", "webp"]);
 
 export function App() {
   const [capabilityMode, setCapabilityMode] =
@@ -58,15 +61,16 @@ export function App() {
   const [trainingLogs, setTrainingLogs] = useState<string[]>([]);
   const [trainingError, setTrainingError] = useState<string | null>(null);
   const [isTrainingSubmitting, setIsTrainingSubmitting] = useState(false);
-  const [taskDirectories, setTaskDirectories] =
-    useState<TaskDirectories>(defaultTaskDirectories);
-  const [hasCustomTaskDirectories, setHasCustomTaskDirectories] = useState(false);
   const [modelOptions, setModelOptions] = useState<ModelOptionsResponse | null>(null);
   const [modelOptionsError, setModelOptionsError] = useState<string | null>(null);
-  const [globalDevice, setGlobalDevice] = useState<DevicePreference>("auto");
-  const [locallySavedDevice, setLocallySavedDevice] = useState<DevicePreference | null>(
+  const [classificationDataset, setClassificationDataset] =
+    useState<DatasetPreviewResponse | null>(null);
+  const [trainingDataset, setTrainingDataset] = useState<DatasetPreviewResponse | null>(
     null,
   );
+  const [datasetError, setDatasetError] = useState<string | null>(null);
+  const [isImportingDataset, setIsImportingDataset] = useState(false);
+  const [globalDevice, setGlobalDevice] = useState<DevicePreference>("auto");
   const [runtimeHardware, setRuntimeHardware] =
     useState<RuntimeHardwareResponse | null>(null);
   const [settingsDraftWorkingDirectory, setSettingsDraftWorkingDirectory] =
@@ -74,9 +78,17 @@ export function App() {
   const [settingsDraftDevice, setSettingsDraftDevice] =
     useState<DevicePreference>("auto");
   const [settingsError, setSettingsError] = useState<string | null>(null);
-  const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  const [isSettingsSaving, setIsSettingsSaving] = useState(false);
+  const [taskDirectorySettings, setTaskDirectorySettings] = useState<
+    Record<TaskCapabilityMode, TaskDirectories>
+  >(() => ({
+    classification: defaultTaskDirectoriesForMode("classification"),
+    training: defaultTaskDirectoriesForMode("training"),
+  }));
+  const taskDirectories = useMemo(
+    () => taskDirectorySettings[capabilityMode],
+    [capabilityMode, taskDirectorySettings],
+  );
 
   const selectedStatus = useMemo(() => {
     if (capabilityMode === "training" && trainingRun) {
@@ -93,21 +105,13 @@ export function App() {
     () => findModelOption(modelOptions, trainingRequest.base_model_ref),
     [modelOptions, trainingRequest.base_model_ref],
   );
-  const selectedModelRequiresDownload = Boolean(
-    selectedModelOption?.source === "huggingface" &&
-      selectedModelOption.requires_download &&
-      !trainingRequest.allow_download,
-  );
+  const selectedModelAllowsDownload = selectedModelOption?.source === "huggingface";
   const selectedModelCompatibilityError =
     selectedModelOption?.compatible === false
       ? selectedModelOption.compatibility_error ||
         "当前模型不是图片分类模型，请选择兼容模型。"
       : null;
-  const startBlockedReason = selectedModelCompatibilityError
-    ? selectedModelCompatibilityError
-    : selectedModelRequiresDownload
-      ? "需勾选允许显式下载模型，或选择本地已缓存模型。"
-      : null;
+  const startBlockedReason = selectedModelCompatibilityError;
   const activeTaskMode = getActiveTaskMode({
     classificationRun,
     trainingRun,
@@ -150,12 +154,13 @@ export function App() {
     setClassificationError(null);
 
     try {
+      const classificationDirectories = taskDirectorySettings.classification;
       const request: BatchInferenceRequest = {
         model_ref: trainingRequest.base_model_ref,
-        model_directory: taskDirectories.model_directory,
-        allow_download: trainingRequest.allow_download,
-        input_directory: taskDirectories.dataset_directory,
-        output_directory: taskDirectories.output_directory,
+        model_directory: classificationDirectories.model_directory,
+        allow_download: selectedModelAllowsDownload,
+        input_directory: classificationDirectories.dataset_directory,
+        output_directory: classificationDirectories.output_directory,
         recursive: true,
         batch_size: batchSize,
         top_k: 5,
@@ -190,22 +195,6 @@ export function App() {
     setTrainingRequest((current) => ({ ...current, ...update }));
   }
 
-  function applyTaskDirectories(nextDirectories: TaskDirectories, isCustom = true) {
-    setTaskDirectories(nextDirectories);
-    setHasCustomTaskDirectories(isCustom);
-    setTrainingRequest((current) => ({
-      ...current,
-      model_directory: nextDirectories.model_directory,
-      dataset_directory: nextDirectories.dataset_directory,
-      output_directory: nextDirectories.output_directory,
-      checkpoint_directory: nextDirectories.checkpoint_directory,
-    }));
-  }
-
-  function updateTaskDirectory() {
-    showDirectoryLockedToast();
-  }
-
   function updateTaskModel(modelRef: string) {
     setTrainingRequest((current) => ({
       ...current,
@@ -230,44 +219,28 @@ export function App() {
     try {
       const loaded = await getSettings();
       const loadedDevice = normalizeDevice(loaded.device);
-      const effectiveDevice = locallySavedDevice ?? loadedDevice;
       setSettingsDraftWorkingDirectory(loaded.working_directory);
-      setSettingsDraftDevice(effectiveDevice);
-      setGlobalDevice(effectiveDevice);
-      updateTrainingRequest({ device: effectiveDevice });
-
-      if (!hasCustomTaskDirectories) {
-        applyTaskDirectories(
-          deriveTaskDirectories(
-            loaded.working_directory,
-            nebulaSorterTask.directory_name,
-          ),
-          false,
-        );
-      }
+      setSettingsDraftDevice(loadedDevice);
+      setTaskDirectorySettings(directoriesFromSettings(loaded));
+      setGlobalDevice(loadedDevice);
+      updateTrainingRequest({ device: loadedDevice });
     } catch (error) {
       setSettingsError(error instanceof Error ? error.message : "加载设置失败。");
     }
-  }, [hasCustomTaskDirectories, locallySavedDevice]);
+  }, []);
 
   useEffect(() => {
     let isCurrent = true;
 
     void getSettings()
       .then((loaded) => {
-        if (isCurrent && !hasCustomTaskDirectories) {
+        if (isCurrent) {
           const loadedDevice = normalizeDevice(loaded.device);
           setSettingsDraftWorkingDirectory(loaded.working_directory);
           setSettingsDraftDevice(loadedDevice);
+          setTaskDirectorySettings(directoriesFromSettings(loaded));
           setGlobalDevice(loadedDevice);
           updateTrainingRequest({ device: loadedDevice });
-          applyTaskDirectories(
-            deriveTaskDirectories(
-              loaded.working_directory,
-              nebulaSorterTask.directory_name,
-            ),
-            false,
-          );
         }
       })
       .catch(() => {
@@ -277,157 +250,96 @@ export function App() {
     return () => {
       isCurrent = false;
     };
-  }, [hasCustomTaskDirectories]);
-
-  async function saveSettings() {
-    setIsSettingsSaving(true);
-    setSettingsError(null);
-
-    try {
-      const requestedDevice = settingsDraftDevice;
-      const saved = await updateSettings({
-        working_directory: settingsDraftWorkingDirectory,
-        device: requestedDevice,
-      });
-      const savedDevice = normalizeDevice(requestedDevice);
-      setLocallySavedDevice(savedDevice);
-      setSettingsDraftWorkingDirectory(saved.working_directory);
-      setSettingsDraftDevice(savedDevice);
-      setGlobalDevice(savedDevice);
-      updateTrainingRequest({ device: savedDevice });
-
-      if (!hasCustomTaskDirectories) {
-        applyTaskDirectories(
-          deriveTaskDirectories(
-            saved.working_directory,
-            nebulaSorterTask.directory_name,
-          ),
-          false,
-        );
-      }
-      setIsSettingsOpen(false);
-    } catch (error) {
-      setSettingsError(error instanceof Error ? error.message : "保存设置失败。");
-    } finally {
-      setIsSettingsSaving(false);
-    }
-  }
-
-  function showDirectoryLockedToast() {
-    setToastMessage("当前版本不允许更改目录");
-    window.setTimeout(() => {
-      setToastMessage(null);
-    }, 2600);
-  }
+  }, []);
 
   const refreshTrainingRun = useCallback(async (runId: string) => {
     const [run, logs] = await Promise.all([getRun(runId), getRunLogs(runId)]);
-    setTrainingRun(run);
+    setTrainingRun((current) => mergeRunRefresh(current, run));
     setTrainingLogs(logs.logs);
   }, []);
 
   const refreshClassificationRun = useCallback(async (runId: string) => {
     const [run, logs] = await Promise.all([getRun(runId), getRunLogs(runId)]);
-    setClassificationRun(run);
+    setClassificationRun((current) => mergeRunRefresh(current, run));
     setClassificationLogs(logs.logs);
   }, []);
 
+  const refreshDatasets = useCallback(async () => {
+    const [classification, training] = await Promise.all([
+      getImageClassificationDataset("classification"),
+      getImageClassificationDataset("training"),
+    ]);
+    setClassificationDataset(classification);
+    setTrainingDataset(training);
+  }, []);
+
+  useEffect(() => {
+    void refreshDatasets().catch((error: unknown) => {
+      setDatasetError(error instanceof Error ? error.message : "加载数据集预览失败。");
+    });
+  }, [refreshDatasets]);
+
   useEffect(() => {
     let isCurrent = true;
-    setModelOptionsError(null);
 
-    void getModelOptions(taskDirectories.model_directory)
-      .then((options) => {
-        if (isCurrent) {
-          setModelOptions(options);
-        }
-      })
-      .catch((error: unknown) => {
-        if (isCurrent) {
-          setModelOptionsError(
-            error instanceof Error ? error.message : "加载模型列表失败。",
-          );
-        }
-      });
+    function refreshModelOptions() {
+      setModelOptionsError(null);
+
+      void getModelOptions(taskDirectorySettings.classification.model_directory)
+        .then((options) => {
+          if (isCurrent) {
+            setModelOptions(options);
+          }
+        })
+        .catch((error: unknown) => {
+          if (isCurrent) {
+            setModelOptionsError(
+              error instanceof Error ? error.message : "加载模型列表失败。",
+            );
+          }
+        });
+    }
+
+    function refreshVisibleModelOptions() {
+      if (document.visibilityState === "visible") {
+        refreshModelOptions();
+      }
+    }
+
+    refreshModelOptions();
+    const intervalId = window.setInterval(
+      refreshModelOptions,
+      modelOptionsRefreshIntervalMs,
+    );
+    window.addEventListener("focus", refreshModelOptions);
+    document.addEventListener("visibilitychange", refreshVisibleModelOptions);
 
     return () => {
       isCurrent = false;
+      window.clearInterval(intervalId);
+      window.removeEventListener("focus", refreshModelOptions);
+      document.removeEventListener("visibilitychange", refreshVisibleModelOptions);
     };
-  }, [taskDirectories.model_directory]);
+  }, [taskDirectorySettings.classification.model_directory]);
 
-  async function startTraining() {
-    if (activeTaskMode) {
+  useEffect(() => {
+    const fallbackModel = pickFallbackModel(modelOptions);
+    if (!fallbackModel) {
       return;
     }
 
-    setIsTrainingSubmitting(true);
-    setTrainingError(null);
-
-    try {
-      const request = { ...trainingRequest, device: globalDevice };
-      const created = await createImageClassificationTraining(request);
-      setTrainingRun(
-        createPendingRun(
-          created.run_id,
-          created.status,
-          "image_classification_training",
-          request,
-          request.base_model_ref,
-          request.dataset_directory,
-          request.output_directory,
-          request.device,
-        ),
-      );
-      setTrainingLogs([]);
-      await refreshTrainingRun(created.run_id);
-    } catch (error) {
-      setTrainingError(error instanceof Error ? error.message : "训练请求失败。");
-    } finally {
-      setIsTrainingSubmitting(false);
+    if (!hasModelOption(modelOptions, trainingRequest.base_model_ref)) {
+      updateTaskModel(fallbackModel);
     }
-  }
+  }, [modelOptions, trainingRequest.base_model_ref]);
 
-  async function cancelTraining() {
-    if (!trainingRun) {
-      return;
-    }
-
-    setTrainingError(null);
-
-    try {
-      await cancelRun(trainingRun.run_id);
-      setTrainingLogs((current) =>
-        current.includes("正在取消运行") ? current : [...current, "正在取消运行"],
-      );
-      await refreshTrainingRun(trainingRun.run_id);
-      setTrainingLogs((current) =>
-        current.includes("正在取消运行") ? current : [...current, "正在取消运行"],
-      );
-    } catch (error) {
-      setTrainingError(error instanceof Error ? error.message : "取消运行失败。");
-    }
-  }
-
-  async function cancelClassification() {
-    if (!classificationRun) {
-      return;
-    }
-
-    setClassificationError(null);
-
-    try {
-      await cancelRun(classificationRun.run_id);
-      setClassificationLogs((current) =>
-        current.includes("正在取消运行") ? current : [...current, "正在取消运行"],
-      );
-      await refreshClassificationRun(classificationRun.run_id);
-      setClassificationLogs((current) =>
-        current.includes("正在取消运行") ? current : [...current, "正在取消运行"],
-      );
-    } catch (error) {
-      setClassificationError(error instanceof Error ? error.message : "取消运行失败。");
-    }
-  }
+  useEffect(() => {
+    void getRuntimeHardware()
+      .then(setRuntimeHardware)
+      .catch(() => {
+        // Settings stays usable when the backend cannot report hardware details.
+      });
+  }, []);
 
   useEffect(() => {
     if (!trainingRun || !unfinishedRunStatuses.has(trainingRun.status)) {
@@ -461,24 +373,162 @@ export function App() {
     return () => window.clearInterval(intervalId);
   }, [classificationRun, refreshClassificationRun]);
 
-  useEffect(() => {
-    void getRuntimeHardware()
-      .then(setRuntimeHardware)
-      .catch(() => {
-        // Settings stays usable when the backend cannot report hardware details.
-      });
-  }, []);
-
-  useEffect(() => {
-    const fallbackModel = pickFallbackModel(modelOptions);
-    if (!fallbackModel) {
+  async function startTraining() {
+    if (activeTaskMode) {
       return;
     }
 
-    if (!hasModelOption(modelOptions, trainingRequest.base_model_ref)) {
-      updateTaskModel(fallbackModel);
+    setIsTrainingSubmitting(true);
+    setTrainingError(null);
+
+    try {
+      const trainingDirectories = taskDirectorySettings.training;
+      const request = {
+        ...trainingRequest,
+        model_directory: trainingDirectories.model_directory,
+        dataset_directory: trainingDirectories.dataset_directory,
+        output_directory: trainingDirectories.output_directory,
+        checkpoint_directory: trainingDirectories.checkpoint_directory,
+        allow_download: selectedModelAllowsDownload,
+        device: globalDevice,
+      };
+      const created = await createImageClassificationTraining(request);
+      setTrainingRun(
+        createPendingRun(
+          created.run_id,
+          created.status,
+          "image_classification_training",
+          request,
+          request.base_model_ref,
+          request.dataset_directory,
+          request.output_directory,
+          request.device,
+        ),
+      );
+      setTrainingLogs([]);
+      await refreshTrainingRun(created.run_id);
+    } catch (error) {
+      setTrainingError(error instanceof Error ? error.message : "训练请求失败。");
+    } finally {
+      setIsTrainingSubmitting(false);
     }
-  }, [modelOptions, trainingRequest.base_model_ref]);
+  }
+
+  async function cancelTraining() {
+    if (!trainingRun) {
+      return;
+    }
+
+    setTrainingError(null);
+    setTrainingRun((current) => markRunCancelling(current, trainingRun.run_id));
+
+    try {
+      const cancelled = await cancelRun(trainingRun.run_id);
+      setTrainingRun((current) =>
+        current && current.run_id === cancelled.run_id
+          ? { ...current, status: cancelled.status }
+          : current,
+      );
+      setTrainingLogs((current) =>
+        current.includes("正在取消运行") ? current : [...current, "正在取消运行"],
+      );
+      await refreshTrainingRun(trainingRun.run_id);
+      setTrainingLogs((current) =>
+        current.includes("正在取消运行") ? current : [...current, "正在取消运行"],
+      );
+    } catch (error) {
+      setTrainingError(error instanceof Error ? error.message : "取消运行失败。");
+    }
+  }
+
+  async function cancelClassification() {
+    if (!classificationRun) {
+      return;
+    }
+
+    setClassificationError(null);
+    setClassificationRun((current) =>
+      markRunCancelling(current, classificationRun.run_id),
+    );
+
+    try {
+      const cancelled = await cancelRun(classificationRun.run_id);
+      setClassificationRun((current) =>
+        current && current.run_id === cancelled.run_id
+          ? { ...current, status: cancelled.status }
+          : current,
+      );
+      setClassificationLogs((current) =>
+        current.includes("正在取消运行") ? current : [...current, "正在取消运行"],
+      );
+      await refreshClassificationRun(classificationRun.run_id);
+      setClassificationLogs((current) =>
+        current.includes("正在取消运行") ? current : [...current, "正在取消运行"],
+      );
+    } catch (error) {
+      setClassificationError(error instanceof Error ? error.message : "取消运行失败。");
+    }
+  }
+
+  async function openClassificationOutput(runId: string) {
+    setClassificationError(null);
+
+    try {
+      await openRunOutput(runId);
+    } catch (error) {
+      setClassificationError(
+        error instanceof Error ? error.message : "无法打开结果目录。",
+      );
+    }
+  }
+
+  async function importDataset(mode: DatasetMode, label?: string) {
+    if (!window.showDirectoryPicker) {
+      setDatasetError("当前浏览器不支持目录导入。");
+      return;
+    }
+
+    const normalizedLabel = label?.trim();
+    if (mode === "training" && !normalizedLabel) {
+      setDatasetError("请先添加或选择训练 label。");
+      return;
+    }
+
+    setDatasetError(null);
+    setIsImportingDataset(true);
+
+    try {
+      const directory = await window.showDirectoryPicker({ mode: "read" });
+      const files = await collectImageFiles(directory);
+      if (files.length === 0) {
+        setDatasetError("所选目录中未发现支持格式图片。");
+        return;
+      }
+      await importImageClassificationDataset({
+        mode,
+        label: normalizedLabel,
+        files,
+      });
+      await refreshDatasets();
+    } catch (error) {
+      setDatasetError(error instanceof Error ? error.message : "导入数据集失败。");
+    } finally {
+      setIsImportingDataset(false);
+    }
+  }
+
+  async function clearDataset(mode: DatasetMode): Promise<boolean> {
+    setDatasetError(null);
+
+    try {
+      await clearImageClassificationDataset(mode);
+      await refreshDatasets();
+      return true;
+    } catch (error) {
+      setDatasetError(error instanceof Error ? error.message : "清空数据集失败。");
+      return false;
+    }
+  }
 
   return (
     <main className="min-h-screen overflow-hidden bg-[#03060d] text-slate-100">
@@ -500,6 +550,15 @@ export function App() {
             </div>
             <div className="hidden rounded-md border border-white/10 bg-white/[0.045] px-3 py-2 text-sm text-slate-300 lg:block">
               全局设备：{globalDevice.toUpperCase()}
+            </div>
+            <div
+              className="hidden max-w-[32rem] rounded-md border border-white/10 bg-white/[0.045] px-3 py-2 text-sm text-slate-300 xl:block"
+              title={taskDirectories.working_directory}
+            >
+              <span className="text-slate-500">工作目录：</span>
+              <span className="inline-block max-w-[24rem] truncate align-bottom font-mono text-cyan-100">
+                {taskDirectories.working_directory}
+              </span>
             </div>
           </div>
 
@@ -526,22 +585,24 @@ export function App() {
           trainingError={trainingError}
           modelOptions={modelOptions}
           modelOptionsError={modelOptionsError}
-          taskDirectories={taskDirectories}
-          isTrainingSubmitting={isTrainingSubmitting}
-          isClassificationSubmitting={isClassificationSubmitting}
+          classificationDataset={classificationDataset}
+          trainingDataset={trainingDataset}
+          datasetError={datasetError}
+          isImportingDataset={isImportingDataset}
           canStartTask={canStartTask}
           startBlockedReason={startBlockedReason}
           activeTaskMode={activeTaskMode}
           onCapabilityModeChange={setCapabilityMode}
           onMoreSettingsToggle={() => setIsMoreSettingsOpen((current) => !current)}
           onTrainingRequestChange={updateTrainingRequest}
-          onTaskDirectoryChange={updateTaskDirectory}
           onTaskModelChange={updateTaskModel}
-          onSelectTaskDirectory={showDirectoryLockedToast}
           onStartClassification={startClassification}
           onStartTraining={startTraining}
           onCancelClassification={cancelClassification}
           onCancelTraining={cancelTraining}
+          onOpenClassificationOutput={openClassificationOutput}
+          onImportDataset={importDataset}
+          onClearDataset={clearDataset}
         />
 
         {isSettingsOpen ? (
@@ -550,20 +611,9 @@ export function App() {
             draftDevice={settingsDraftDevice}
             runtimeHardware={runtimeHardware}
             error={settingsError}
-            isSaving={isSettingsSaving}
             onClose={() => setIsSettingsOpen(false)}
             onDraftDeviceChange={setSettingsDraftDevice}
-            onSave={saveSettings}
           />
-        ) : null}
-
-        {toastMessage ? (
-          <div
-            className="fixed bottom-5 left-1/2 z-50 -translate-x-1/2 rounded-lg border border-cyan-300/25 bg-[#07111c]/95 px-4 py-3 text-sm font-medium text-cyan-100 shadow-[0_18px_50px_rgba(0,0,0,0.45)] backdrop-blur-xl"
-            role="status"
-          >
-            {toastMessage}
-          </div>
         ) : null}
 
         <div className="fixed bottom-5 left-4 z-20 hidden items-center gap-2 rounded-lg border border-white/10 bg-black/45 p-2 shadow-2xl shadow-cyan-950/40 backdrop-blur-xl md:flex">
@@ -627,6 +677,29 @@ function getActiveTaskMode({
   return null;
 }
 
+function markRunCancelling(run: RunRecord | null, runId: string): RunRecord | null {
+  if (!run || run.run_id !== runId || !cancellableRunStatuses.has(run.status)) {
+    return run;
+  }
+  return { ...run, status: "cancelling" };
+}
+
+function mergeRunRefresh(current: RunRecord | null, refreshed: RunRecord): RunRecord {
+  if (
+    current?.run_id === refreshed.run_id &&
+    current.status === "cancelling" &&
+    cancellableRunStatuses.has(refreshed.status)
+  ) {
+    return {
+      ...refreshed,
+      status: "cancelling",
+      error_message: current.error_message,
+    };
+  }
+
+  return refreshed;
+}
+
 function createPendingRun(
   runId: string,
   status: RunStatus,
@@ -654,6 +727,36 @@ function createPendingRun(
     updated_at: now,
     started_at: null,
     completed_at: null,
+  };
+}
+
+function directoriesFromSettings(
+  settings: DirectorySettings,
+): Record<TaskCapabilityMode, TaskDirectories> {
+  const classificationDatasetDirectory =
+    settings.classification_dataset_directory ?? settings.dataset_directory;
+  const classificationOutputDirectory =
+    settings.classification_output_directory ?? settings.output_directory;
+  const trainingDatasetDirectory =
+    settings.training_dataset_directory ?? settings.dataset_directory;
+  const trainingOutputDirectory =
+    settings.training_output_directory ?? settings.output_directory;
+
+  return {
+    classification: {
+      working_directory: settings.working_directory,
+      model_directory: settings.model_directory,
+      dataset_directory: classificationDatasetDirectory,
+      output_directory: classificationOutputDirectory,
+      checkpoint_directory: settings.checkpoint_directory,
+    },
+    training: {
+      working_directory: settings.working_directory,
+      model_directory: settings.model_directory,
+      dataset_directory: trainingDatasetDirectory,
+      output_directory: trainingOutputDirectory,
+      checkpoint_directory: settings.checkpoint_directory,
+    },
   };
 }
 
@@ -699,26 +802,49 @@ function normalizeDevice(device: unknown): DevicePreference {
     : "auto";
 }
 
-function deriveTaskDirectories(
-  workingDirectory: string,
-  childDirectoryName?: string,
-): TaskDirectories {
-  const normalized = trimTrailingSlash(workingDirectory);
-  const taskWorkingDirectory = childDirectoryName
-    ? `${normalized}/${childDirectoryName}`
-    : normalized;
+async function collectImageFiles(
+  directory: BrowserDirectoryHandle,
+): Promise<DatasetImportFile[]> {
+  const files: DatasetImportFile[] = [];
 
-  return {
-    working_directory: taskWorkingDirectory,
-    model_directory: `${taskWorkingDirectory}/models`,
-    dataset_directory: `${taskWorkingDirectory}/datasets`,
-    output_directory: `${taskWorkingDirectory}/outputs`,
-    checkpoint_directory: `${taskWorkingDirectory}/checkpoints`,
-  };
+  async function visit(handle: BrowserDirectoryHandle, prefix: string) {
+    const entries = handle.entries
+      ? handle.entries()
+      : handle.values
+        ? mapValuesToEntries(handle.values())
+        : null;
+    if (!entries) {
+      return;
+    }
+
+    for await (const [name, entry] of entries) {
+      const relativePath = prefix ? `${prefix}/${name}` : name;
+      if (entry.kind === "file") {
+        const file = await entry.getFile();
+        if (isSupportedImageName(file.name || name)) {
+          files.push({ file, relativePath });
+        }
+      } else {
+        await visit(entry, relativePath);
+      }
+    }
+  }
+
+  await visit(directory, "");
+  return files;
 }
 
-function trimTrailingSlash(path: string): string {
-  return path.replace(/\/+$/, "") || path;
+async function* mapValuesToEntries(
+  values: AsyncIterableIterator<BrowserDirectoryHandle | BrowserFileHandle>,
+): AsyncIterableIterator<[string, BrowserDirectoryHandle | BrowserFileHandle]> {
+  for await (const entry of values) {
+    yield [entry.name, entry];
+  }
+}
+
+function isSupportedImageName(name: string): boolean {
+  const extension = name.split(".").pop()?.toLowerCase() ?? "";
+  return supportedImportExtensions.has(extension);
 }
 
 function SettingsDialog({
@@ -726,19 +852,15 @@ function SettingsDialog({
   draftDevice,
   runtimeHardware,
   error,
-  isSaving,
   onClose,
   onDraftDeviceChange,
-  onSave,
 }: {
   draftWorkingDirectory: string;
   draftDevice: DevicePreference;
   runtimeHardware: RuntimeHardwareResponse | null;
   error: string | null;
-  isSaving: boolean;
   onClose: () => void;
   onDraftDeviceChange: (value: DevicePreference) => void;
-  onSave: () => void;
 }) {
   return (
     <div
@@ -754,7 +876,7 @@ function SettingsDialog({
           <div>
             <h2 className="text-xl font-semibold text-white">本地默认设置</h2>
             <p className="mt-1 text-sm text-slate-400">
-              设置全局默认工作目录；模型由各个子应用单独选择。
+              目录和设备由仓库根目录 .env 配置；这里仅展示当前生效值。
             </p>
           </div>
           <button
@@ -781,6 +903,7 @@ function SettingsDialog({
             <select
               aria-label="硬件设备"
               className="min-w-0 rounded-lg border border-white/10 bg-[#121827] px-3 py-2 text-slate-100 outline-none transition focus:border-cyan-300/45 focus:ring-2 focus:ring-cyan-300/15"
+              disabled
               value={draftDevice}
               onChange={(event) =>
                 onDraftDeviceChange(event.currentTarget.value as DevicePreference)
@@ -818,16 +941,7 @@ function SettingsDialog({
             type="button"
             onClick={onClose}
           >
-            取消
-          </button>
-          <button
-            className="inline-flex items-center gap-2 rounded-lg bg-cyan-400 px-4 py-2 text-sm font-semibold text-cyan-950 transition hover:bg-cyan-300 disabled:cursor-not-allowed disabled:opacity-60"
-            type="button"
-            disabled={isSaving}
-            onClick={onSave}
-          >
-            <Save className="size-4" aria-hidden="true" />
-            保存设置
+            关闭
           </button>
         </div>
       </section>

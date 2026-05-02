@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import re
+import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Event
@@ -20,6 +22,47 @@ def _now() -> str:
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def safe_label_directory_name(label: str) -> str:
+    safe_label = re.sub(r"[^\w.-]+", "_", label.strip())
+    safe_label = re.sub(r"_+", "_", safe_label).strip("_")
+    if safe_label in {"", ".", ".."}:
+        return "unknown"
+    return safe_label
+
+
+def _unique_destination(path: Path, used_destinations: set[Path]) -> Path:
+    candidate = path
+    suffix = 2
+    while candidate in used_destinations or candidate.exists():
+        candidate = path.with_name(f"{path.stem}__{suffix}{path.suffix}")
+        suffix += 1
+    used_destinations.add(candidate)
+    return candidate
+
+
+def copy_classified_image(
+    *,
+    image_path: Path,
+    assigned_label: str,
+    output_directory: Path,
+    input_root: Path | None,
+    used_destinations: set[Path],
+) -> Path:
+    label_directory = output_directory / "by_label" / safe_label_directory_name(assigned_label)
+    try:
+        relative_path = (
+            image_path.resolve().relative_to(input_root.resolve()) if input_root else None
+        )
+    except ValueError:
+        relative_path = None
+
+    destination = label_directory / (relative_path or image_path.name)
+    destination = _unique_destination(destination, used_destinations)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(image_path, destination)
+    return destination
 
 
 def validate_imagefolder_dataset(dataset_directory: str) -> list[str]:
@@ -56,6 +99,7 @@ def run_batch_inference(
     device: str,
     cancel_event: Event,
     log_callback: LogCallback,
+    input_root: Path | None = None,
 ) -> dict[str, Any]:
     torch = __import__("torch")
     image_module = __import__("PIL.Image", fromlist=["Image"])
@@ -68,6 +112,10 @@ def run_batch_inference(
     results_path = output_directory / "classification_results.jsonl"
     metadata_path = output_directory / "metadata.json"
     started_at = _now()
+    organized_root = output_directory / "by_label"
+    used_destinations: set[Path] = set()
+    label_directories: dict[str, dict[str, str]] = {}
+    organized_items = 0
 
     resolved = resolve_model_ref(model_ref, allow_download, model_directory)
     if resolved.source == "hf_repo" and allow_download:
@@ -128,8 +176,32 @@ def run_batch_inference(
                         str(index)
                     )
                     predictions.append({"label": str(label or index), "score": float(score)})
+                assigned_label = predictions[0]["label"]
+                assigned_score = predictions[0]["score"]
+                organized_path = copy_classified_image(
+                    image_path=image_path,
+                    assigned_label=assigned_label,
+                    output_directory=output_directory,
+                    input_root=input_root,
+                    used_destinations=used_destinations,
+                )
+                safe_label = safe_label_directory_name(assigned_label)
+                label_directories[safe_label] = {
+                    "label": assigned_label,
+                    "path": str(output_directory / "by_label" / safe_label),
+                }
+                organized_items += 1
                 output.write(
-                    json.dumps({"image_path": str(image_path), "predictions": predictions}) + "\n"
+                    json.dumps(
+                        {
+                            "image_path": str(image_path),
+                            "predictions": predictions,
+                            "assigned_label": assigned_label,
+                            "assigned_score": assigned_score,
+                            "organized_path": str(organized_path),
+                        }
+                    )
+                    + "\n"
                 )
                 processed += 1
 
@@ -144,6 +216,9 @@ def run_batch_inference(
         "successful_items": processed - failed,
         "failed_items": failed,
         "results_path": str(results_path),
+        "organized_root": str(organized_root),
+        "organized_items": organized_items,
+        "label_directories": label_directories,
     }
     _write_json(metadata_path, metadata)
 

@@ -257,6 +257,9 @@ def create_app() -> FastAPI:
                 "batch_size": inference_request.batch_size,
                 "top_k": inference_request.top_k,
                 "device": device,
+                "input_root": Path(inference_request.input_directory).expanduser()
+                if inference_request.input_directory
+                else None,
             },
         )
         return RunCreateResponse(run_id=run.run_id, status=run.status)

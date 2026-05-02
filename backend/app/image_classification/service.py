@@ -166,7 +166,7 @@ def run_imagefolder_training(
     epochs: int,
     batch_size: int,
     learning_rate: float,
-    seed: int,
+    seed: int | None,
     device: str,
     cancel_event: Event,
     log_callback: LogCallback,
@@ -222,19 +222,22 @@ def run_imagefolder_training(
     dataset = dataset.with_transform(transform)
     eval_dataset = dataset.get("validation") or dataset.get("val")
 
-    training_args = transformers.TrainingArguments(
-        output_dir=str(checkpoint_directory),
-        per_device_train_batch_size=batch_size,
-        per_device_eval_batch_size=batch_size,
-        num_train_epochs=epochs,
-        learning_rate=learning_rate,
-        seed=seed,
-        remove_unused_columns=False,
-        push_to_hub=False,
-        save_strategy="epoch",
-        eval_strategy="epoch" if eval_dataset is not None else "no",
-        report_to=[],
-    )
+    training_args_kwargs = {
+        "output_dir": str(checkpoint_directory),
+        "per_device_train_batch_size": batch_size,
+        "per_device_eval_batch_size": batch_size,
+        "num_train_epochs": epochs,
+        "learning_rate": learning_rate,
+        "remove_unused_columns": False,
+        "push_to_hub": False,
+        "save_strategy": "epoch",
+        "eval_strategy": "epoch" if eval_dataset is not None else "no",
+        "report_to": [],
+    }
+    if seed is not None:
+        training_args_kwargs["seed"] = seed
+
+    training_args = transformers.TrainingArguments(**training_args_kwargs)
 
     if cancel_event.is_set():
         raise RuntimeError("Training was cancelled before start.")

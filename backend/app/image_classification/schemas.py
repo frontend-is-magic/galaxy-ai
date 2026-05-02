@@ -13,6 +13,7 @@ class Prediction(BaseModel):
 
 class BatchInferenceRequest(BaseModel):
     model_ref: str
+    model_directory: str | None = None
     allow_download: bool = False
     input_directory: str | None = None
     input_paths: list[str] | None = None
@@ -31,12 +32,14 @@ class BatchInferenceRequest(BaseModel):
 
 class TrainingRequest(BaseModel):
     base_model_ref: str
+    model_directory: str | None = None
     allow_download: bool = False
     dataset_directory: str
     output_directory: str | None = None
     checkpoint_directory: str | None = None
-    epochs: int = Field(default=3, ge=1, le=1000)
+    epochs: int = Field(default=50, ge=1, le=1000)
     batch_size: int = Field(default=8, ge=1, le=256)
     learning_rate: float = Field(default=5e-5, gt=0)
     seed: int = 42
+    use_seed: bool = False
     device: str = "auto"

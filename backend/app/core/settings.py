@@ -33,23 +33,23 @@ class AppSettings(BaseSettings):
 
     @property
     def fallback_model_directory(self) -> Path:
-        return self.repo_root / "models"
+        return self.fallback_working_directory / "models"
 
     @property
     def fallback_output_directory(self) -> Path:
-        return self.repo_root / "outputs"
+        return self.fallback_working_directory / "outputs"
 
     @property
     def fallback_dataset_directory(self) -> Path:
-        return self.repo_root / "datasets"
+        return self.fallback_working_directory / "datasets"
 
     @property
     def fallback_checkpoint_directory(self) -> Path:
-        return self.repo_root / "checkpoints"
+        return self.fallback_working_directory / "checkpoints"
 
     @property
     def fallback_working_directory(self) -> Path:
-        return self.repo_root
+        return Path.home() / "Documents" / "galaxy-ai"
 
 
 @lru_cache

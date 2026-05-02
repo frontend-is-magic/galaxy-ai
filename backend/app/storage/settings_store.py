@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Literal
 
 import aiosqlite
 from pydantic import BaseModel
@@ -13,38 +14,46 @@ class DirectorySettings(BaseModel):
     dataset_directory: str
     checkpoint_directory: str
     working_directory: str
+    device: Literal["auto", "cpu", "cuda", "mps"] = "auto"
     database_path: str
 
 
 class DirectorySettingsUpdate(BaseModel):
-    model_directory: str
-    output_directory: str
-    dataset_directory: str
-    checkpoint_directory: str
     working_directory: str
+    device: Literal["auto", "cpu", "cuda", "mps"] = "auto"
 
 
-DIRECTORY_KEYS = (
-    "model_directory",
-    "output_directory",
-    "dataset_directory",
-    "checkpoint_directory",
-    "working_directory",
-)
+SETTINGS_KEYS = ("device",)
 
 
 def _stringify(path: Path) -> str:
     return str(path.expanduser())
 
 
-def fallback_directory_settings(settings: AppSettings) -> dict[str, str]:
+def _directory_settings_from_working_directory(working_directory: Path) -> dict[str, str]:
     return {
-        "model_directory": _stringify(settings.fallback_model_directory),
-        "output_directory": _stringify(settings.fallback_output_directory),
-        "dataset_directory": _stringify(settings.fallback_dataset_directory),
-        "checkpoint_directory": _stringify(settings.fallback_checkpoint_directory),
-        "working_directory": _stringify(settings.fallback_working_directory),
+        "model_directory": _stringify(working_directory / "models"),
+        "output_directory": _stringify(working_directory / "outputs"),
+        "dataset_directory": _stringify(working_directory / "datasets"),
+        "checkpoint_directory": _stringify(working_directory / "checkpoints"),
+        "working_directory": _stringify(working_directory),
+        "device": "auto",
     }
+
+
+def _ensure_directory_settings(values: dict[str, str]) -> None:
+    Path(values["working_directory"]).expanduser().mkdir(parents=True, exist_ok=True)
+    for key in (
+        "model_directory",
+        "output_directory",
+        "dataset_directory",
+        "checkpoint_directory",
+    ):
+        Path(values[key]).expanduser().mkdir(parents=True, exist_ok=True)
+
+
+def fallback_directory_settings(settings: AppSettings) -> dict[str, str]:
+    return _directory_settings_from_working_directory(settings.fallback_working_directory)
 
 
 async def read_directory_settings(settings: AppSettings) -> DirectorySettings:
@@ -56,9 +65,10 @@ async def read_directory_settings(settings: AppSettings) -> DirectorySettings:
             rows = await cursor.fetchall()
 
     for key, value in rows:
-        if key in values:
-            values[key] = value
+        if key == "device":
+            values["device"] = value
 
+    _ensure_directory_settings(values)
     return DirectorySettings(**values, database_path=_stringify(settings.database_path))
 
 
@@ -68,6 +78,7 @@ async def write_directory_settings(
 ) -> DirectorySettings:
     await initialize_database(settings.database_path)
     values = update.model_dump()
+    _ensure_directory_settings(fallback_directory_settings(settings))
 
     async with aiosqlite.connect(settings.database_path) as connection:
         await connection.executemany(
@@ -78,7 +89,7 @@ async def write_directory_settings(
                 value = excluded.value,
                 updated_at = CURRENT_TIMESTAMP
             """,
-            [(key, values[key]) for key in DIRECTORY_KEYS],
+            [(key, str(values[key])) for key in SETTINGS_KEYS],
         )
         await connection.commit()
 

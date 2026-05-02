@@ -8,12 +8,11 @@ export type HardwareBackend = {
 
 export type TaskStatus = "idle" | "running" | "completed" | "error";
 
-export type TaskViewMode = "starmap" | "professional";
-
 export type TaskCapabilityMode = "classification" | "training";
 
 export type TaskPlanet = {
   id: string;
+  directory_name: string;
   name: string;
   task_type: string;
   status: TaskStatus;
@@ -24,6 +23,7 @@ export type BatchImageClassificationTask = TaskPlanet & {
   hardware_backend: HardwareBackend;
   model_path: string;
   working_directory: string;
+  model_directory: string;
   input_directory: string;
   output_directory: string;
   supported_formats: string[];
@@ -31,4 +31,12 @@ export type BatchImageClassificationTask = TaskPlanet & {
   processed_images: number;
   error_message: string | null;
   status_message: string;
+};
+
+export type TaskDirectories = {
+  working_directory: string;
+  model_directory: string;
+  dataset_directory: string;
+  output_directory: string;
+  checkpoint_directory: string;
 };

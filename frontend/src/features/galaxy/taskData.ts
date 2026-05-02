@@ -3,6 +3,7 @@ import type { TrainingRequest } from "./api";
 
 export const nebulaSorterTask: BatchImageClassificationTask = {
   id: "nebula-sorter",
+  directory_name: "nebula-sorter",
   name: "星云分拣站",
   task_type: "批量图片分类",
   status: "idle",
@@ -12,8 +13,9 @@ export const nebulaSorterTask: BatchImageClassificationTask = {
     label: "Apple GPU / MPS",
     device_name: "本机图形处理器",
   },
-  model_path: "~/Models/resnet50",
+  model_path: "",
   working_directory: "~/Projects/NebulaSorter",
+  model_directory: "~/Projects/NebulaSorter/models",
   input_directory: "~/Projects/NebulaSorter/input",
   output_directory: "~/Projects/NebulaSorter/output",
   supported_formats: ["jpg", "jpeg", "png", "bmp", "webp"],
@@ -24,14 +26,16 @@ export const nebulaSorterTask: BatchImageClassificationTask = {
 };
 
 export const defaultTrainingRequest: TrainingRequest = {
-  base_model_ref: "~/Models/resnet50",
+  base_model_ref: "",
+  model_directory: "~/Projects/NebulaSorter/models",
   allow_download: false,
   dataset_directory: "~/Datasets/NebulaSorter",
   output_directory: "~/Projects/NebulaSorter/output",
   checkpoint_directory: "~/Projects/NebulaSorter/checkpoints",
-  epochs: 3,
+  epochs: 50,
   batch_size: 8,
   learning_rate: 0.00005,
   seed: 42,
+  use_seed: false,
   device: "auto",
 };

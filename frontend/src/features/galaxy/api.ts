@@ -1,5 +1,8 @@
+export type DevicePreference = "auto" | "cpu" | "cuda" | "mps";
+
 export type TrainingRequest = {
   base_model_ref: string;
+  model_directory: string | null;
   allow_download: boolean;
   dataset_directory: string;
   output_directory: string | null;
@@ -8,7 +11,34 @@ export type TrainingRequest = {
   batch_size: number;
   learning_rate: number;
   seed: number;
-  device: string;
+  use_seed: boolean;
+  device: DevicePreference;
+};
+
+export type DirectorySettings = {
+  model_directory: string;
+  output_directory: string;
+  dataset_directory: string;
+  checkpoint_directory: string;
+  working_directory: string;
+  device: DevicePreference;
+  database_path: string;
+};
+
+export type DirectorySettingsUpdate = {
+  working_directory: string;
+  device: DevicePreference;
+};
+
+export type ModelOption = {
+  label: string;
+  path: string;
+  source: "local" | "huggingface";
+};
+
+export type ModelOptionsResponse = {
+  local_models: ModelOption[];
+  recommended_hf_models: ModelOption[];
 };
 
 export type RunCreateResponse = {
@@ -47,6 +77,12 @@ export type RunLogsResponse = {
   logs: string[];
 };
 
+export type RuntimeHardwareResponse = {
+  active_backend: string;
+  torch_available: boolean;
+  backends: Record<string, { available: boolean; label?: string }>;
+};
+
 const apiBaseUrl = import.meta.env.VITE_GALAXY_API_BASE_URL || "http://127.0.0.1:8000";
 
 export async function createImageClassificationTraining(
@@ -70,6 +106,30 @@ export async function cancelRun(runId: string): Promise<RunCreateResponse> {
   return apiRequest<RunCreateResponse>(`/runs/${runId}/cancel`, {
     method: "POST",
   });
+}
+
+export async function getSettings(): Promise<DirectorySettings> {
+  return apiRequest<DirectorySettings>("/settings");
+}
+
+export async function updateSettings(
+  request: DirectorySettingsUpdate,
+): Promise<DirectorySettings> {
+  return apiRequest<DirectorySettings>("/settings", {
+    method: "PUT",
+    body: JSON.stringify(request),
+  });
+}
+
+export async function getModelOptions(
+  modelDirectory: string,
+): Promise<ModelOptionsResponse> {
+  const params = new URLSearchParams({ model_directory: modelDirectory });
+  return apiRequest<ModelOptionsResponse>(`/models/options?${params.toString()}`);
+}
+
+export async function getRuntimeHardware(): Promise<RuntimeHardwareResponse> {
+  return apiRequest<RuntimeHardwareResponse>("/runtime/hardware");
 }
 
 async function apiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {

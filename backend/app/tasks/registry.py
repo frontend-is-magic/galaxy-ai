@@ -32,6 +32,13 @@ TASKS = [
         description="Analyze local images with a local vision model.",
     ),
     TaskDefinition(
+        id="image-classification",
+        name="Batch image classification",
+        status="available",
+        local_execution=True,
+        description="Classify local image batches and fine-tune local image classifiers.",
+    ),
+    TaskDefinition(
         id="speech-transcription",
         name="Speech transcription",
         status="planned",

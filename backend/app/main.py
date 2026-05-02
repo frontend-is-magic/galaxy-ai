@@ -1,11 +1,31 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
 
 from app.core.settings import AppSettings, get_settings
+from app.image_classification.device import select_device
+from app.image_classification.model_resolver import resolve_model_ref
+from app.image_classification.scanner import scan_images
+from app.image_classification.schemas import (
+    BatchInferenceRequest,
+    RunCreateResponse,
+    TrainingRequest,
+)
+from app.image_classification.service import validate_imagefolder_dataset
+from app.runs.executor import RunExecutor
 from app.runtime.hardware import detect_hardware
 from app.storage.database import initialize_database
+from app.storage.runs_store import (
+    RunCreate,
+    RunRecord,
+    append_run_log,
+    create_run,
+    get_run,
+    list_run_logs,
+    mark_unfinished_runs_interrupted,
+)
 from app.storage.settings_store import (
     DirectorySettings,
     DirectorySettingsUpdate,
@@ -21,10 +41,15 @@ def _settings() -> AppSettings:
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+async def lifespan(api: FastAPI) -> AsyncIterator[None]:
     settings = _settings()
     await initialize_database(settings.database_path)
-    yield
+    await mark_unfinished_runs_interrupted(settings.database_path)
+    api.state.run_executor = RunExecutor(settings.database_path)
+    try:
+        yield
+    finally:
+        api.state.run_executor.shutdown()
 
 
 def create_app() -> FastAPI:
@@ -59,6 +84,167 @@ def create_app() -> FastAPI:
     @api.get("/tasks")
     async def tasks() -> dict[str, list[TaskDefinition]]:
         return {"tasks": list_tasks()}
+
+    @api.post(
+        "/image-classification/inference",
+        response_model=RunCreateResponse,
+        status_code=202,
+    )
+    async def create_image_classification_inference(
+        request: Request,
+        inference_request: BatchInferenceRequest,
+    ) -> RunCreateResponse:
+        settings = _settings()
+        directory_settings = await read_directory_settings(settings)
+        device = select_device(inference_request.device)
+
+        try:
+            image_paths = scan_images(
+                inference_request.input_directory,
+                inference_request.input_paths,
+                inference_request.recursive,
+            )
+            resolved = resolve_model_ref(
+                inference_request.model_ref,
+                inference_request.allow_download,
+                Path(directory_settings.model_directory),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        output_base = Path(
+            inference_request.output_directory or directory_settings.output_directory
+        )
+        run = await create_run(
+            settings.database_path,
+            RunCreate(
+                run_type="image_classification_inference",
+                request=inference_request.model_dump(),
+                hardware_backend=device,
+                model_ref=inference_request.model_ref,
+                input_path=inference_request.input_directory
+                or ",".join(inference_request.input_paths or []),
+                output_path=str(output_base),
+                total_items=len(image_paths),
+            ),
+        )
+        await append_run_log(
+            settings.database_path,
+            run.run_id,
+            (
+                f"Model source resolved as {resolved.source}; "
+                f"allow_download={inference_request.allow_download}."
+            ),
+        )
+        request.app.state.run_executor.submit(
+            run.run_id,
+            __import__(
+                "app.image_classification.service",
+                fromlist=["run_batch_inference"],
+            ).run_batch_inference,
+            {
+                "model_ref": inference_request.model_ref,
+                "allow_download": inference_request.allow_download,
+                "model_directory": Path(directory_settings.model_directory),
+                "image_paths": image_paths,
+                "output_directory": output_base / run.run_id,
+                "batch_size": inference_request.batch_size,
+                "top_k": inference_request.top_k,
+                "device": device,
+            },
+        )
+        return RunCreateResponse(run_id=run.run_id, status=run.status)
+
+    @api.post(
+        "/image-classification/training",
+        response_model=RunCreateResponse,
+        status_code=202,
+    )
+    async def create_image_classification_training(
+        request: Request,
+        training_request: TrainingRequest,
+    ) -> RunCreateResponse:
+        settings = _settings()
+        directory_settings = await read_directory_settings(settings)
+        device = select_device(training_request.device)
+
+        try:
+            labels = validate_imagefolder_dataset(training_request.dataset_directory)
+            resolved = resolve_model_ref(
+                training_request.base_model_ref,
+                training_request.allow_download,
+                Path(directory_settings.model_directory),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        output_base = Path(training_request.output_directory or directory_settings.output_directory)
+        checkpoint_base = Path(
+            training_request.checkpoint_directory or directory_settings.checkpoint_directory
+        )
+        run = await create_run(
+            settings.database_path,
+            RunCreate(
+                run_type="image_classification_training",
+                request=training_request.model_dump(),
+                hardware_backend=device,
+                model_ref=training_request.base_model_ref,
+                input_path=training_request.dataset_directory,
+                output_path=str(output_base),
+                total_items=len(labels),
+            ),
+        )
+        await append_run_log(
+            settings.database_path,
+            run.run_id,
+            (
+                f"Model source resolved as {resolved.source}; "
+                f"allow_download={training_request.allow_download}."
+            ),
+        )
+        request.app.state.run_executor.submit(
+            run.run_id,
+            __import__(
+                "app.image_classification.service",
+                fromlist=["run_imagefolder_training"],
+            ).run_imagefolder_training,
+            {
+                "base_model_ref": training_request.base_model_ref,
+                "allow_download": training_request.allow_download,
+                "model_directory": Path(directory_settings.model_directory),
+                "dataset_directory": Path(training_request.dataset_directory),
+                "output_directory": output_base / run.run_id,
+                "checkpoint_directory": checkpoint_base / run.run_id,
+                "epochs": training_request.epochs,
+                "batch_size": training_request.batch_size,
+                "learning_rate": training_request.learning_rate,
+                "seed": training_request.seed,
+                "device": device,
+            },
+        )
+        return RunCreateResponse(run_id=run.run_id, status=run.status)
+
+    @api.get("/runs/{run_id}", response_model=RunRecord)
+    async def read_run(run_id: str) -> RunRecord:
+        run = await get_run(_settings().database_path, run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
+        return run
+
+    @api.get("/runs/{run_id}/logs")
+    async def read_run_logs(run_id: str) -> dict[str, list[str]]:
+        run = await get_run(_settings().database_path, run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
+        return {"logs": await list_run_logs(_settings().database_path, run_id)}
+
+    @api.post("/runs/{run_id}/cancel")
+    async def cancel_run(request: Request, run_id: str) -> dict[str, str]:
+        try:
+            status = await request.app.state.run_executor.cancel(run_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return {"run_id": run_id, "status": status}
 
     return api
 

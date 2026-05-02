@@ -32,6 +32,15 @@ def test_tasks_returns_initial_task_registry():
                 "description": "Analyze local images with a local vision model.",
             },
             {
+                "id": "image-classification",
+                "name": "Batch image classification",
+                "status": "available",
+                "local_execution": True,
+                "description": (
+                    "Classify local image batches and fine-tune local image classifiers."
+                ),
+            },
+            {
                 "id": "speech-transcription",
                 "name": "Speech transcription",
                 "status": "planned",
